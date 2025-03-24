@@ -121,9 +121,9 @@ public class Satocash extends javacard.framework.Applet {
     private final static byte INS_SATOCASH_EXPORT_KEYSET= (byte)0xB5;
     private final static byte INS_SATOCASH_REMOVE_KEYSET= (byte)0xB6;
 
-    private final static byte INS_SATOCASH_IMPORT_TOKEN= (byte)0xB7;
-    private final static byte INS_SATOCASH_EXPORT_TOKENS = (byte)0xB8;
-    private final static byte INS_SATOCASH_GET_TOKEN_INFO= (byte)0xB9;
+    private final static byte INS_SATOCASH_IMPORT_PROOF = (byte)0xB7;
+    private final static byte INS_SATOCASH_EXPORT_PROOFS = (byte)0xB8;
+    private final static byte INS_SATOCASH_GET_PROOF_INFO = (byte)0xB9;
 
     // TODO
     // 2FA support
@@ -317,7 +317,6 @@ public class Satocash extends javacard.framework.Applet {
     private byte[] mints;
     private static final byte MAX_NB_MINTS = 16; // todo: configurable in constructor, should fit in 1 byte!
     private static final byte MAX_MINT_URL_SIZE = 32; // todo: configurable in constructor
-    private static final byte MINT_BITMAP_SIZE = (MAX_NB_MINTS+7) >> 3; // number of bytes required to store a bitmap of used keysets
     private static final byte MINT_OBJECT_SIZE = 33;
     private static final byte MINT_OFFSET_URLSIZE = 0; // 1 byte
     private static final byte MINT_OFFSET_URL = 1; // max 32 bytes
@@ -325,36 +324,34 @@ public class Satocash extends javacard.framework.Applet {
     // Keysets table
     private byte[] keysets;
     private static final byte MAX_NB_KEYSETS = 32; // todo: configurable in constructor, should fit in 1 byte!
-    private static final byte KEYSET_BITMAP_SIZE = (MAX_NB_KEYSETS+7) >> 3; // number of bytes required to store a bitmap of used keysets
     private static final byte KEYSET_OBJECT_SIZE = 10;
     private static final byte KEYSET_OFFSET_ID = 0; // 8 bytes
     private static final byte KEYSET_OFFSET_MINT_INDEX = 8; // 1 byte
     private static final byte KEYSET_OFFSET_UNIT = 9; // 1 byte
 
-    // Tokens table
-    private byte[] tokens;
-    private static final short MAX_NB_TOKENS = 128; // todo: configurable in constructor
-    private static final short TOKEN_BITMAP_SIZE = (MAX_NB_TOKENS+7) >> 3; // number of bytes required to store a bitmap of used tokens
-    private static final byte TOKEN_OBJECT_SIZE = 67;
-    private static final byte TOKEN_OFFSET_STATE = 0; // 1 byte
-    private static final byte TOKEN_OFFSET_KEYSET_INDEX = 1; // 1 byte
-    private static final byte TOKEN_OFFSET_AMOUNT = 2; // 1 byte
-    private static final byte TOKEN_OFFSET_SECRET = 3; // 32 bytes
-    private static final byte TOKEN_OFFSET_UNBLINDED_KEY = 35; // 32 bytes
+    // Proofs table
+    private byte[] proofs;
+    private static final short MAX_NB_PROOFS = 128; // todo: configurable in constructor
+    private static final byte PROOF_OBJECT_SIZE = 67;
+    private static final byte PROOF_OFFSET_STATE = 0; // 1 byte
+    private static final byte PROOF_OFFSET_KEYSET_INDEX = 1; // 1 byte
+    private static final byte PROOF_OFFSET_AMOUNT = 2; // 1 byte
+    private static final byte PROOF_OFFSET_SECRET = 3; // 32 bytes
+    private static final byte PROOF_OFFSET_UNBLINDED_KEY = 35; // 32 bytes
 
-    // Tokens export index list
-    private short[] token_export_list;
-    private short token_export_index;
-    private short token_export_size;
-    private boolean token_export_flag = false; // set to true when export is ongoing
-    private static final short MAX_TOKEN_EXPORT_LIST_SIZE = 64;
+    // Proofs export index list
+    private short[] proof_export_list;
+    private short proof_export_index;
+    private short proof_export_size;
+    private boolean proof_export_flag = false; // set to true when export is ongoing
+    private static final short MAX_PROOF_EXPORT_LIST_SIZE = 64;
 
 
     // Status info
     private byte NB_MINTS = 0;
     private byte NB_KEYSETS = 0;
-    private byte NB_TOKENS_UNSPENT = 0;
-    private byte NB_TOKENS_SPENT = 0;
+    private short NB_PROOFS_UNSPENT = 0;
+    private short NB_PROOFS_SPENT = 0;
 
     // size constants
     private static final byte SIZE_KEYSETID = 8;
@@ -550,8 +547,8 @@ public class Satocash extends javacard.framework.Applet {
         // Satocash data
         mints = new byte[(short)(MAX_NB_MINTS*MINT_OBJECT_SIZE)];
         keysets = new byte[(short)(MAX_NB_KEYSETS*KEYSET_OBJECT_SIZE)];
-        tokens = new byte[(short)(MAX_NB_TOKENS*TOKEN_OBJECT_SIZE)];
-        token_export_list = new short[MAX_TOKEN_EXPORT_LIST_SIZE];
+        proofs = new byte[(short)(MAX_NB_PROOFS * PROOF_OBJECT_SIZE)];
+        proof_export_list = new short[MAX_PROOF_EXPORT_LIST_SIZE];
 
         // perso PKI: generate public/private keypair
         authentikey_private= (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, LENGTH_EC_FP_256, false);
@@ -741,14 +738,14 @@ public class Satocash extends javacard.framework.Applet {
                 sizeout= satocashRemoveKeyset(apdu, buffer);
                 break;
 
-            case INS_SATOCASH_IMPORT_TOKEN:
-                sizeout= satocashImportToken(apdu, buffer);
+            case INS_SATOCASH_IMPORT_PROOF:
+                sizeout= satocashImportProof(apdu, buffer);
                 break;
-            case INS_SATOCASH_EXPORT_TOKENS:
-                sizeout= satocashExportTokens(apdu, buffer);
+            case INS_SATOCASH_EXPORT_PROOFS:
+                sizeout= satocashExportProofs(apdu, buffer);
                 break;
-            case INS_SATOCASH_GET_TOKEN_INFO:
-                sizeout= satocashGetTokenInfo(apdu, buffer);
+            case INS_SATOCASH_GET_PROOF_INFO:
+                sizeout= satocashGetProofInfo(apdu, buffer);
                 break;
 
             // PKI
@@ -984,18 +981,18 @@ public class Satocash extends javacard.framework.Applet {
 
     /**
      * This function retrieves general information about the Applet running on the smart
-     * card, and useful information about the status of current session such as:
-     *      - applet version (4b)
+     * card, and useful information about the status of current session
      *
      *  ins: 0x3C
      *  p1: 0x00
      *  p2: 0x00
      *  data: none
      *  return: [versions(4b) | PIN0-PUK0-PIN1-PUK1 tries (4b) |
-     *            needs2FA (1b) | needsPIN(1b) | setupDone(1b) | needs_secure_channel(1b) | nfc_policy(1b)
-     *            MAX_NB_MINT (1b) | NB_USED_MINT(1b) | bitmap_size(1b) | mint_bitmap |
-     *            MAX_NB_KEYSET(1b) | NB_USED_KEYSET(1b) | | bitmap_size(1b) | keyset_bitmap |
-     *            MAX_NB_TOKEN(1b) | NB_UNSPENT_TOKEN(1b)
+     *            needs2FA (1b) | needsPIN(1b) | setupDone(1b) | needs_secure_channel(1b) | nfc_policy(1b) |
+     *            pin_policy(1b) | RFU(1b) |
+     *            MAX_NB_MINT (1b) | NB_USED_MINT(1b) |
+     *            MAX_NB_KEYSET(1b) | NB_USED_KEYSET(1b)  |
+     *            MAX_NB_PROOFS(2b) | NB_PROOFS_UNSPENT(2b) | NB_PROOFS_SPENT(2b)
      *          ]
      *
      *  Exceptions: (none)
@@ -1048,11 +1045,11 @@ public class Satocash extends javacard.framework.Applet {
         buffer[pos++] = NB_MINTS;
         buffer[pos++] = MAX_NB_KEYSETS;
         buffer[pos++] = NB_KEYSETS;
-        Util.setShort(buffer, pos, MAX_NB_TOKENS);
+        Util.setShort(buffer, pos, MAX_NB_PROOFS);
         pos+=2;
-        Util.setShort(buffer, pos, NB_TOKENS_UNSPENT);
+        Util.setShort(buffer, pos, NB_PROOFS_UNSPENT);
         pos+=2;
-        Util.setShort(buffer, pos, NB_TOKENS_SPENT);
+        Util.setShort(buffer, pos, NB_PROOFS_SPENT);
         pos+=2;
 
         return pos;
@@ -1159,7 +1156,7 @@ public class Satocash extends javacard.framework.Applet {
 
     /**
      * This function removes a mint URL from the card.
-     * The mint should have no unspent token associated with it.
+     * The mint should have no unspent proof associated with it.
      *
      *  ins: 0xB3
      *  p1: index
@@ -1322,7 +1319,7 @@ public class Satocash extends javacard.framework.Applet {
 
     /**
      * This function removes a keyset info from the card.
-     * The keyset should have no unspent token associated with it.
+     * The keyset should have no unspent proof associated with it.
      *
      *  ins: 0xB6
      *  p1: index
@@ -1342,12 +1339,12 @@ public class Satocash extends javacard.framework.Applet {
         if ((index < 0) || (index >= MAX_NB_KEYSETS) )
             ISOException.throwIt(SW_INCORRECT_P1);
 
-        // check that no tokens refers to this keyset
-        for (byte token_index=(byte)0; token_index<MAX_NB_TOKENS; token_index++){
-            if ((tokens[(short)(token_index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_KEYSET_INDEX)]) == index) {
-                // check if the keyset is still referenced by an unspent token
-                // spent token are basically only kept as backup
-                if ((tokens[(short)(token_index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_STATE)]) == STATE_UNSPENT)
+        // check that no proofs refers to this keyset
+        for (byte proof_index = (byte)0; proof_index< MAX_NB_PROOFS; proof_index++){
+            if ((proofs[(short)(proof_index* PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)]) == index) {
+                // check if the keyset is still referenced by an unspent proof
+                // spent proof are basically only kept as backup
+                if ((proofs[(short)(proof_index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)]) == STATE_UNSPENT)
                     ISOException.throwIt(SW_OPERATION_NOT_ALLOWED); // todo: use more specific code?
             }
         }
@@ -1359,7 +1356,7 @@ public class Satocash extends javacard.framework.Applet {
     }
 
     /**
-     * This function imports a token in the card.
+     * This function imports a proof in the card.
      *
      *  ins: 0xB7
      *  p1: RFU
@@ -1369,18 +1366,18 @@ public class Satocash extends javacard.framework.Applet {
      *
      *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C01 SW_NO_MEMORY_LEFT, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER
      */
-    private short satocashImportToken(APDU apdu, byte[] buffer) {
+    private short satocashImportProof(APDU apdu, byte[] buffer) {
         // check that PIN has been entered previously
         if (!pin.isValidated())
             ISOException.throwIt(SW_UNAUTHORIZED);
 
-        // check that there are still token slot available
-        if (NB_TOKENS_SPENT+NB_TOKENS_UNSPENT >= MAX_NB_TOKENS)
+        // check that there are still proof slot available
+        if (NB_PROOFS_SPENT + NB_PROOFS_UNSPENT >= MAX_NB_PROOFS)
             ISOException.throwIt(SW_NO_MEMORY_LEFT); // todo: use more specific error?
 
         // check input size
         short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
-        if (bytesLeft < (short)(TOKEN_OBJECT_SIZE-1))
+        if (bytesLeft < (short)(PROOF_OBJECT_SIZE -1))
             ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 
         short buffer_offset=ISO7816.OFFSET_CDATA;
@@ -1397,13 +1394,13 @@ public class Satocash extends javacard.framework.Applet {
         if (amount<0)
             ISOException.throwIt(SW_INVALID_PARAMETER); // todo: amount can be <0 (would represent a negative power of 2)?
 
-        // todo: check if token already present?
+        // todo: check if proof already present?
 
         // find empty slot
         byte found_slot_state = STATE_UNSPENT;
         short index;
-        for (index=(byte)0; index<MAX_NB_TOKENS; index++) {
-            if ((tokens[(short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_STATE)]) == STATE_EMPTY) {
+        for (index=(byte)0; index< MAX_NB_PROOFS; index++) {
+            if ((proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)]) == STATE_EMPTY) {
                 // slot is empty
                 found_slot_state = STATE_EMPTY;
                 break;
@@ -1412,8 +1409,8 @@ public class Satocash extends javacard.framework.Applet {
 
         if (found_slot_state == STATE_UNSPENT){
             // if no empty slot available, look for a spent_slot to overwrite
-            for (index=(byte)0; index<MAX_NB_TOKENS; index++) {
-                if ((tokens[(short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_STATE)]) == STATE_SPENT) {
+            for (index=(byte)0; index< MAX_NB_PROOFS; index++) {
+                if ((proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)]) == STATE_SPENT) {
                     // slot is spent
                     found_slot_state = STATE_SPENT;
                     break;
@@ -1424,18 +1421,18 @@ public class Satocash extends javacard.framework.Applet {
         if (found_slot_state == STATE_UNSPENT)
             ISOException.throwIt(SW_NO_MEMORY_LEFT); // todo: use more specific error
 
-        // copy token in available slot
-        tokens[(short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_KEYSET_INDEX)] = keyset_index;
-        tokens[(short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_AMOUNT)] = amount;
+        // copy proof in available slot
+        proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)] = keyset_index;
+        proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT)] = amount;
         // copy secret & unblinded key
-        Util.arrayCopy(buffer, buffer_offset, tokens, (short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_SECRET), (short) 64);
+        Util.arrayCopy(buffer, buffer_offset, proofs, (short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_SECRET), (short) 64);
         buffer_offset+=(short)64;
 
         // update state
-        tokens[(short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_STATE)] = STATE_UNSPENT;
-        NB_TOKENS_UNSPENT++;
+        proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] = STATE_UNSPENT;
+        NB_PROOFS_UNSPENT++;
         if (found_slot_state == STATE_SPENT)
-            NB_TOKENS_SPENT--;
+            NB_PROOFS_SPENT--;
 
         // return index
         Util.setShort(buffer, (short)0, index);
@@ -1443,20 +1440,20 @@ public class Satocash extends javacard.framework.Applet {
     }
 
     /**
-     * This function exports multiple tokens from the card.
+     * This function exports multiple proofs from the card.
      *
      *  ins: 0xB8
      *  p1: RFU
      *  p2: OP_INIT | OP_PROCESS
-     *  data (OP_INIT): [ token_index_list_size(1b) | token_index(2b) ... | 2FA_size(1b) | 2FA ] else
+     *  data (OP_INIT): [ proof_index_list_size(1b) | proof_index(2b) ... | 2FA_size(1b) | 2FA ] else
      *  data (OP_PROCESS): []
      *
-     *  return: [token_index(2b) | token_state(1b) | keyset_index(1b) | amount(1b) | secret(32b) | unblinded_key(32b)]
+     *  return: [proof_index(2b) | proof_state(1b) | keyset_index(1b) | amount(1b) | secret(32b) | unblinded_key(32b)]
      *
      *  exceptions (OP_INIT): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER,
      *  exceptions (OP_PROCESS): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 9C13 SW_INCORRECT_INITIALIZATION,
      */
-    private short  satocashExportTokens(APDU apdu, byte[] buffer) {
+    private short satocashExportProofs(APDU apdu, byte[] buffer) {
         // check that PIN has been entered previously
         if (!pin.isValidated())
             ISOException.throwIt(SW_UNAUTHORIZED);
@@ -1475,31 +1472,31 @@ public class Satocash extends javacard.framework.Applet {
 
                 // get list size
                 short buffer_offset = ISO7816.OFFSET_CDATA;
-                short token_index_list_size = Util.makeShort((byte)0x00, buffer[buffer_offset++]);
+                short proof_index_list_size = Util.makeShort((byte)0x00, buffer[buffer_offset++]);
                 bytesLeft--;
-                if (token_index_list_size<=0 || token_index_list_size>96)
+                if (proof_index_list_size<=0 || proof_index_list_size>96)
                     ISOException.throwIt(SW_INVALID_PARAMETER);
 
                 //check data size again
-                if (bytesLeft < (short)(2*token_index_list_size))
+                if (bytesLeft < (short)(2*proof_index_list_size))
                     ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 
                 // TODO: check 2FA if enabled
-                // idea: compute hash of available token data (index, keyset_id, amount) and uses this as challenge
+                // idea: compute hash of available proof data (index, keyset_id, amount) and uses this as challenge
 
                 // copy list in array and save in state for next APDU calls
                 short index_out=0;
-                for (short index_in= 0; index_in<token_index_list_size; index_in++) {
-                    short index_token = Util.getShort(buffer, (short)(buffer_offset+2*index_in));
-                    // check index_token
-                    if (index_token<0 || index_token>=MAX_NB_TOKENS)
+                for (short index_in= 0; index_in<proof_index_list_size; index_in++) {
+                    short index_proof = Util.getShort(buffer, (short)(buffer_offset+2*index_in));
+                    // check index_proof
+                    if (index_proof<0 || index_proof>= MAX_NB_PROOFS)
                         ISOException.throwIt(SW_INVALID_PARAMETER);
-                    // save index_token in state
-                    token_export_list[index_out++] = index_token;
+                    // save index_proof in state
+                    proof_export_list[index_out++] = index_proof;
                 }
-                token_export_size = token_index_list_size;
-                token_export_index = 0;
-                token_export_flag = true;
+                proof_export_size = proof_index_list_size;
+                proof_export_index = 0;
+                proof_export_flag = true;
 
                 // note: intentional fallthrough
                 // without the 'break' instruction, we fall through the OP_PROCESS phase directly, thus saving one APDU call...
@@ -1508,50 +1505,50 @@ public class Satocash extends javacard.framework.Applet {
             case OP_PROCESS:
 
                 // check flag
-                if (!token_export_flag)
+                if (!proof_export_flag)
                     ISOException.throwIt(SW_INCORRECT_INITIALIZATION);
 
                 // prepare output buffer
                 buffer_offset = 0;
 
-                // process up to 3 token per OP_PROCESS apdu call
-                short nb_token_to_process = (short)(token_export_size-token_export_index);
-                if (nb_token_to_process>3)
-                    nb_token_to_process = 3;
+                // process up to 3 proof per OP_PROCESS apdu call
+                short nb_proof_to_process = (short)(proof_export_size - proof_export_index);
+                if (nb_proof_to_process>3)
+                    nb_proof_to_process = 3;
 
-                // start from last token_export_index position and export each token
-                for (byte i= 0; i<nb_token_to_process; i++){
-                    // get index_token from state
-                    short index_token = token_export_list[token_export_index++];
+                // start from last proof_export_index position and export each proof
+                for (byte i= 0; i<nb_proof_to_process; i++){
+                    // get index_proof from state
+                    short index_proof = proof_export_list[proof_export_index++];
 
-                    // check token state
-                    short token_offset_state = (short)(index_token*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_STATE);
-                    if (tokens[token_offset_state] == STATE_EMPTY){
-                        // if token is empty, fill with 0x00
-                        Util.setShort(buffer, buffer_offset, index_token);
+                    // check proof state
+                    short proof_offset_state = (short)(index_proof* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE);
+                    if (proofs[proof_offset_state] == STATE_EMPTY){
+                        // if proof is empty, fill with 0x00
+                        Util.setShort(buffer, buffer_offset, index_proof);
                         buffer_offset+=2;
-                        Util.arrayFillNonAtomic(buffer, buffer_offset, TOKEN_OBJECT_SIZE, (byte)0x00);
+                        Util.arrayFillNonAtomic(buffer, buffer_offset, PROOF_OBJECT_SIZE, (byte)0x00);
                         //buffer[buffer_offset] = STATE_EMPTY; // update state, not needed as STATE_EMPTY == 0x00
-                        buffer_offset+=TOKEN_OBJECT_SIZE;
+                        buffer_offset+= PROOF_OBJECT_SIZE;
 
                     } else {
-                        // export token data
-                        Util.setShort(buffer, buffer_offset, index_token);
+                        // export proof data
+                        Util.setShort(buffer, buffer_offset, index_proof);
                         buffer_offset+=2;
-                        Util.arrayCopy(tokens, token_offset_state, buffer, buffer_offset, TOKEN_OBJECT_SIZE);
-                        buffer_offset+=TOKEN_OBJECT_SIZE;
-                        // if token was unspent, change its state to spent
-                        if (tokens[token_offset_state] == STATE_UNSPENT) {
-                            tokens[token_offset_state] = STATE_SPENT;
-                            NB_TOKENS_SPENT++;
-                            NB_TOKENS_UNSPENT--;
+                        Util.arrayCopy(proofs, proof_offset_state, buffer, buffer_offset, PROOF_OBJECT_SIZE);
+                        buffer_offset+= PROOF_OBJECT_SIZE;
+                        // if proof was unspent, change its state to spent
+                        if (proofs[proof_offset_state] == STATE_UNSPENT) {
+                            proofs[proof_offset_state] = STATE_SPENT;
+                            NB_PROOFS_SPENT++;
+                            NB_PROOFS_UNSPENT--;
                         }
                     }
                 } // end for
 
-                // if all tokens have been exported, set export flag to false
-                if (token_export_index >= token_export_size)
-                    token_export_flag = false;
+                // if all proofs have been exported, set export flag to false
+                if (proof_export_index >= proof_export_size)
+                    proof_export_flag = false;
 
                 return buffer_offset;
 
@@ -1564,19 +1561,19 @@ public class Satocash extends javacard.framework.Applet {
 
 
     /**
-     * This function returns some token info from the card.
-     * The sensitive token data (secret, unblinded_key) is not returned.
-     * Only valid (unspent) token are considered.
+     * This function returns some proof info from the card.
+     * The sensitive proof data (secret, unblinded_key) is not returned.
+     * Only valid (unspent) proof are considered.
      *
      *  ins: 0xB9
      *  p1: unit
      *  p2: into_type (amounts, mints_index, keyset_index, state)
      *  data: [index_start(2b) | index_size(2b)]
-     *  return: [info(1b) for each token in range]
+     *  return: [info(1b) for each proof in range]
      *
      *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C0F SW_INVALID_PARAMETER, 6700 SW_WRONG_LENGTH,
      */
-    private short satocashGetTokenInfo(APDU apdu, byte[] buffer) {
+    private short satocashGetProofInfo(APDU apdu, byte[] buffer) {
         // check that PIN has been entered previously
         if (!pin.isValidated())
             ISOException.throwIt(SW_UNAUTHORIZED);
@@ -1589,23 +1586,23 @@ public class Satocash extends javacard.framework.Applet {
         if (bytesLeft == 0){
             // use defaults if no index provided
             index_start = 0;
-            if (MAX_NB_TOKENS < 192)
-                index_size = MAX_NB_TOKENS;
+            if (MAX_NB_PROOFS < 192)
+                index_size = MAX_NB_PROOFS;
             else
                 index_size = CHUNK_SIZE;
 
         } if (bytesLeft >= 4){
             // get & check index
             index_start = Util.getShort(buffer, buffer_offset);
-            if (index_start<0 || index_start>=MAX_NB_TOKENS)
+            if (index_start<0 || index_start>= MAX_NB_PROOFS)
                 ISOException.throwIt(SW_INVALID_PARAMETER);
 
             buffer_offset+=2;
             index_size = Util.getShort(buffer, buffer_offset);
             if (index_size<0)
                 ISOException.throwIt(SW_INVALID_PARAMETER);
-            if ((short)(index_start+index_size) > MAX_NB_TOKENS)
-                index_size = (short)(MAX_NB_TOKENS - index_start);
+            if ((short)(index_start+index_size) > MAX_NB_PROOFS)
+                index_size = (short)(MAX_NB_PROOFS - index_start);
 
         } else {
             ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
@@ -1618,26 +1615,26 @@ public class Satocash extends javacard.framework.Applet {
 
         // check p2 value
         byte info_type = buffer[ISO7816.OFFSET_P2];
-        byte metadata_offset= TOKEN_OFFSET_STATE;
+        byte metadata_offset= PROOF_OFFSET_STATE;
         switch (info_type){
             case METADATA_STATE:
-                metadata_offset = TOKEN_OFFSET_STATE;
+                metadata_offset = PROOF_OFFSET_STATE;
                 break;
             case METADATA_KEYSET_INDEX:
-                metadata_offset = TOKEN_OFFSET_KEYSET_INDEX;
+                metadata_offset = PROOF_OFFSET_KEYSET_INDEX;
                 break;
             case METADATA_AMOUNTS:
-                // for amount info, we must check token unit from the keysets
-                // Then we must check that token state is UNSPENT
-                metadata_offset = TOKEN_OFFSET_KEYSET_INDEX;
+                // for amount info, we must check proof unit from the keysets
+                // Then we must check that proof state is UNSPENT
+                metadata_offset = PROOF_OFFSET_KEYSET_INDEX;
                 break;
             case METADATA_MINT_INDEX:
-                // mint info must be recovered from the keysets table using the token keyset_index
-                metadata_offset = TOKEN_OFFSET_KEYSET_INDEX;
+                // mint info must be recovered from the keysets table using the proof keyset_index
+                metadata_offset = PROOF_OFFSET_KEYSET_INDEX;
                 break;
             case METADATA_UNIT:
-                // unit info must be recovered from the keysets table using the token keyset_index
-                metadata_offset = TOKEN_OFFSET_KEYSET_INDEX;
+                // unit info must be recovered from the keysets table using the proof keyset_index
+                metadata_offset = PROOF_OFFSET_KEYSET_INDEX;
                 break;
             default:
                 ISOException.throwIt(SW_INVALID_PARAMETER);
@@ -1646,32 +1643,32 @@ public class Satocash extends javacard.framework.Applet {
         // export metadata
         buffer_offset = 0;
         for (short index=index_start; index<index_size; index++) {
-            short token_offset = (short)(index*TOKEN_OBJECT_SIZE + metadata_offset);
-            byte metadata = tokens[token_offset];
+            short proof_offset = (short)(index*PROOF_OBJECT_SIZE + metadata_offset);
+            byte metadata = proofs[proof_offset];
 
             // mint info must be recovered from keysets table
             if (info_type == METADATA_MINT_INDEX){
-                // current metadata is the token keyset_index, get token mint from keysets
+                // current metadata is the proof keyset_index, get proof mint from keysets
                 metadata = keysets[(short)(metadata*KEYSET_OBJECT_SIZE + KEYSET_OFFSET_MINT_INDEX)];
 
             } else if (info_type == METADATA_UNIT){
-                // current metadata is the token keyset_index, get token unit from keysets
+                // current metadata is the proof keyset_index, get proof unit from keysets
                 metadata = keysets[(short)(metadata*KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
 
             } else if (info_type == METADATA_AMOUNTS){
 
-                // for amount_metadata, we must check token unit first, then state
-                // current metadata is the token keyset_index, get token unit from keysets
+                // for amount_metadata, we must check proof unit first, then state
+                // current metadata is the proof keyset_index, get proof unit from keysets
                 metadata = keysets[(short)(metadata*KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
                 if (metadata == unit){
-                    // get token state
-                    metadata = tokens[(short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_STATE)];
+                    // get proof state
+                    metadata = proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)];
                     if (metadata == STATE_UNSPENT){
-                        // get token amount
-                        metadata = tokens[(short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_AMOUNT)];
+                        // get proof amount
+                        metadata = proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT)];
                     } else if (metadata == STATE_SPENT) {
                         // if STATE_SPENT, add flag at msb
-                        metadata = (byte) (tokens[(short)(index*TOKEN_OBJECT_SIZE + TOKEN_OFFSET_AMOUNT)] | 0x80);
+                        metadata = (byte) (proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT)] | 0x80);
                     } else {
                         // if STATE_EMPTY, amount is null
                         metadata = AMOUNT_NULL;
@@ -1684,7 +1681,7 @@ public class Satocash extends javacard.framework.Applet {
 
             }
 
-            // update buffer with requested info for each token in range
+            // update buffer with requested info for each proof in range
             buffer[buffer_offset++] = metadata;
         }// end for
 
