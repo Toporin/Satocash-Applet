@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- You may freely edit this file. See commented blocks below for -->
+<!-- some examples of how to customize the build. -->
+<!-- (If you delete it and reopen the project it will be recreated.) -->
+<project name="Satocash" default="build" basedir=".">
+    <description>Builds, tests, and runs the project .</description>
+    
+	<!--
+    You could add descriptions of overridable targets here, or just link to online help...
+    -->
+	<taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="lib/ant-javacard.jar"/>
+	
+	<target name="build">
+		
+		
+		<javacard jckit="sdks/jc304_kit">
+		  <cap aid="5361746f63617368" version="0.1" output="Satocash.cap" sources="src\main\java\org\satocash\applet">
+			<applet class="org.satocash.applet.Satocash" aid="5361746f6361736800"/>
+		  </cap>
+		</javacard>
+		
+		
+	</target>
+	
+</project>
