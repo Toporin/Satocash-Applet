@@ -335,7 +335,7 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte PROOF_OBJECT_SIZE = 67;
     private static final byte PROOF_OFFSET_STATE = 0; // 1 byte
     private static final byte PROOF_OFFSET_KEYSET_INDEX = 1; // 1 byte
-    private static final byte PROOF_OFFSET_AMOUNT = 2; // 1 byte
+    private static final byte PROOF_OFFSET_AMOUNT_EXPONENT = 2; // 1 byte
     private static final byte PROOF_OFFSET_SECRET = 3; // 32 bytes
     private static final byte PROOF_OFFSET_UNBLINDED_KEY = 35; // 32 bytes
 
@@ -375,7 +375,7 @@ public class Satocash extends javacard.framework.Applet {
     // metadata_type constants
     private static final byte METADATA_STATE = 0;
     private static final byte METADATA_KEYSET_INDEX = 1;
-    private static final byte METADATA_AMOUNTS = 2;
+    private static final byte METADATA_AMOUNT_EXPONENT = 2;
     private static final byte METADATA_MINT_INDEX = 3;
     private static final byte METADATA_UNIT = 4;
 
@@ -1361,7 +1361,7 @@ public class Satocash extends javacard.framework.Applet {
      *  ins: 0xB7
      *  p1: RFU
      *  p2: RFU
-     *  data: [keyset_index(1b) | amount(1b) | secret(32b) | unblinded_key(32b)]
+     *  data: [keyset_index(1b) | amount_exponent(1b) | secret(32b) | unblinded_key(32b)]
      *  return: [index(2b)]
      *
      *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C01 SW_NO_MEMORY_LEFT, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER
@@ -1389,10 +1389,10 @@ public class Satocash extends javacard.framework.Applet {
         if (keysets[(short)(keyset_index*KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)] == UNIT_NONE)
             ISOException.throwIt(SW_INVALID_PARAMETER);
 
-        // check amount
-        byte amount = buffer[buffer_offset++];
-        if (amount<0)
-            ISOException.throwIt(SW_INVALID_PARAMETER); // todo: amount can be <0 (would represent a negative power of 2)?
+        // check amount exponent
+        byte amount_exponent = buffer[buffer_offset++];
+        if (amount_exponent<0)
+            ISOException.throwIt(SW_INVALID_PARAMETER); // todo: amount_exponent can be <0 (would represent a negative power of 2)?
 
         // todo: check if proof already present?
 
@@ -1423,7 +1423,7 @@ public class Satocash extends javacard.framework.Applet {
 
         // copy proof in available slot
         proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)] = keyset_index;
-        proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT)] = amount;
+        proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)] = amount_exponent;
         // copy secret & unblinded key
         Util.arrayCopy(buffer, buffer_offset, proofs, (short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_SECRET), (short) 64);
         buffer_offset+=(short)64;
@@ -1448,7 +1448,7 @@ public class Satocash extends javacard.framework.Applet {
      *  data (OP_INIT): [ proof_index_list_size(1b) | proof_index(2b) ... | 2FA_size(1b) | 2FA ] else
      *  data (OP_PROCESS): []
      *
-     *  return: [proof_index(2b) | proof_state(1b) | keyset_index(1b) | amount(1b) | secret(32b) | unblinded_key(32b)]
+     *  return: [proof_index(2b) | proof_state(1b) | keyset_index(1b) | amount_exponent(1b) | secret(32b) | unblinded_key(32b)]
      *
      *  exceptions (OP_INIT): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER,
      *  exceptions (OP_PROCESS): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 9C13 SW_INCORRECT_INITIALIZATION,
@@ -1482,7 +1482,7 @@ public class Satocash extends javacard.framework.Applet {
                     ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 
                 // TODO: check 2FA if enabled
-                // idea: compute hash of available proof data (index, keyset_id, amount) and uses this as challenge
+                // idea: compute hash of available proof data (index, keyset_id, amount_exponent) and uses this as challenge
 
                 // copy list in array and save in state for next APDU calls
                 short index_out=0;
@@ -1567,7 +1567,7 @@ public class Satocash extends javacard.framework.Applet {
      *
      *  ins: 0xB9
      *  p1: unit
-     *  p2: into_type (amounts, mints_index, keyset_index, state)
+     *  p2: into_type (amount_exponent, mints_index, keyset_index, state)
      *  data: [index_start(2b) | index_size(2b)]
      *  return: [info(1b) for each proof in range]
      *
@@ -1623,8 +1623,8 @@ public class Satocash extends javacard.framework.Applet {
             case METADATA_KEYSET_INDEX:
                 metadata_offset = PROOF_OFFSET_KEYSET_INDEX;
                 break;
-            case METADATA_AMOUNTS:
-                // for amount info, we must check proof unit from the keysets
+            case METADATA_AMOUNT_EXPONENT:
+                // for amount exponent info, we must check proof unit from the keysets
                 // Then we must check that proof state is UNSPENT
                 metadata_offset = PROOF_OFFSET_KEYSET_INDEX;
                 break;
@@ -1655,20 +1655,20 @@ public class Satocash extends javacard.framework.Applet {
                 // current metadata is the proof keyset_index, get proof unit from keysets
                 metadata = keysets[(short)(metadata*KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
 
-            } else if (info_type == METADATA_AMOUNTS){
+            } else if (info_type == METADATA_AMOUNT_EXPONENT){
 
-                // for amount_metadata, we must check proof unit first, then state
+                // for amount_exponent metadata, we must check proof unit first, then state
                 // current metadata is the proof keyset_index, get proof unit from keysets
                 metadata = keysets[(short)(metadata*KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
                 if (metadata == unit){
                     // get proof state
                     metadata = proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)];
                     if (metadata == STATE_UNSPENT){
-                        // get proof amount
-                        metadata = proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT)];
+                        // get proof amount exponent
+                        metadata = proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)];
                     } else if (metadata == STATE_SPENT) {
                         // if STATE_SPENT, add flag at msb
-                        metadata = (byte) (proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT)] | 0x80);
+                        metadata = (byte) (proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)] | 0x80);
                     } else {
                         // if STATE_EMPTY, amount is null
                         metadata = AMOUNT_NULL;
