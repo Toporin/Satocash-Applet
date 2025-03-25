@@ -100,6 +100,8 @@ public class Satocash extends javacard.framework.Applet {
     private final static byte INS_CARD_LABEL= (byte)0x3D;
     private final static byte INS_SET_NFC_POLICY = (byte) 0x3E;
     private final static byte INS_SET_NDEF= (byte)0x3F;
+    private final static byte INS_SET_PIN_POLICY= (byte)0x3A;
+    private final static byte INS_SET_PINLESS_AMOUNT= (byte)0x3B;
 
 
     private final static byte INS_BIP32_GET_AUTHENTIKEY= (byte) 0x73;
@@ -406,15 +408,14 @@ public class Satocash extends javacard.framework.Applet {
     // additional options
     private short option_flags;
     private boolean needs2FA = false; // todo: add 2FA support
-    private boolean needsPIN = true; // todo: make PIN optional
 
     // PIN policy
-    private static final byte PIN_DISABLED=0; // never ask pin
-    private static final byte PIN_ENABLED=1; // always ask pin (except for satocash status)
-    private static final byte PIN_ENABLED_FOR_STATE_CHANGE=3; //ask pin for operations that modify card state, including imports
-    private static final byte PIN_ENABLED_FOR_PAYMENT=4; // ask pin for payment
-    private static final byte PIN_ENABLED_FOR_AMOUNT=5; // todo: set max amount without pin
     private byte pin_policy;
+    private static final byte PIN_POLICY_MASK_GET_INFO = 0x01; //
+    private static final byte PIN_POLICY_MASK_CHANGE_STATE = 0x02;
+    private static final byte PIN_POLICY_MASK_MAKE_PAYMENT = 0x04;
+    private byte[] pin_policy_amount_left; // todo: set limit for pinless payment
+    // todo: policy to require authentication for payment?
 
     // NFC 
     private static final byte NFC_ENABLED=0;
@@ -459,9 +460,10 @@ public class Satocash extends javacard.framework.Applet {
         // NFC is enabled by default, can be modified with INS_SET_NFC_POLICY
         nfc_policy = NFC_ENABLED;
 
-        // PIN is enabled by default
-        pin_policy = PIN_ENABLED;
-        
+        // default PIN policy: require pin to change state or make payment
+        pin_policy = PIN_POLICY_MASK_CHANGE_STATE | PIN_POLICY_MASK_MAKE_PAYMENT;
+        pin_policy_amount_left = new byte[4];
+
         // Temporary working arrays
         try {
             tmpBuffer = JCSystem.makeTransientByteArray(TMP_BUFFER_SIZE, JCSystem.CLEAR_ON_DESELECT);
@@ -703,6 +705,12 @@ public class Satocash extends javacard.framework.Applet {
                 break;
             case INS_SET_NFC_POLICY:
                 sizeout= setNfcPolicy(apdu, buffer);
+                break;
+            case INS_SET_PIN_POLICY:
+                sizeout= setPinPolicy(apdu, buffer);
+                break;
+            case INS_SET_PINLESS_AMOUNT:
+                sizeout= setPinlessAmount(apdu, buffer);
                 break;
             case INS_BIP32_GET_AUTHENTIKEY:
                 sizeout= getBIP32AuthentiKey(apdu, buffer);
@@ -988,7 +996,7 @@ public class Satocash extends javacard.framework.Applet {
      *  p2: 0x00
      *  data: none
      *  return: [versions(4b) | PIN0-PUK0-PIN1-PUK1 tries (4b) |
-     *            needs2FA (1b) | needsPIN(1b) | setupDone(1b) | needs_secure_channel(1b) | nfc_policy(1b) |
+     *            needs2FA (1b) | RFU(1b) | setupDone(1b) | needs_secure_channel(1b) | nfc_policy(1b) |
      *            pin_policy(1b) | RFU(1b) |
      *            MAX_NB_MINT (1b) | NB_USED_MINT(1b) |
      *            MAX_NB_KEYSET(1b) | NB_USED_KEYSET(1b)  |
@@ -1051,7 +1059,7 @@ public class Satocash extends javacard.framework.Applet {
         pos+=2;
         Util.setShort(buffer, pos, NB_PROOFS_SPENT);
         pos+=2;
-
+        // todo max amount allowed without PIN (pin_policy_amount_left)
         return pos;
     }
 
@@ -1067,13 +1075,15 @@ public class Satocash extends javacard.framework.Applet {
      *  Exceptions: 9C06 SW_UNAUTHORIZED , 9C01 SW_NO_MEMORY_LEFT, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER
      */
     private short satocashImportMint(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_CHANGE_STATE) == PIN_POLICY_MASK_CHANGE_STATE) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
 
         // check that there are still mint slot available
         if (NB_MINTS >= MAX_NB_MINTS)
-            ISOException.throwIt(SW_NO_MEMORY_LEFT); // todo: use more specific error?
+            ISOException.throwIt(SW_NO_MEMORY_LEFT);
 
         // check input size
         short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
@@ -1137,9 +1147,11 @@ public class Satocash extends javacard.framework.Applet {
      *  Exceptions: 9C06 SW_UNAUTHORIZED , 9C10 SW_INCORRECT_P1
      */
     private short satocashExportMint(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_GET_INFO) == PIN_POLICY_MASK_GET_INFO) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
 
         // check p1 value
         byte index = buffer[ISO7816.OFFSET_P1];
@@ -1167,9 +1179,11 @@ public class Satocash extends javacard.framework.Applet {
      *  Exceptions: 9C06 SW_UNAUTHORIZED , 9C10 SW_INCORRECT_P1, 9C03 SW_OPERATION_NOT_ALLOWED
      */
     private short satocashRemoveMint(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_CHANGE_STATE) == PIN_POLICY_MASK_CHANGE_STATE) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
 
         // check p1 value
         byte index = buffer[ISO7816.OFFSET_P1];
@@ -1180,7 +1194,7 @@ public class Satocash extends javacard.framework.Applet {
         for (byte keyset_index=(byte)0; keyset_index<MAX_NB_KEYSETS; keyset_index++){
             if ((keysets[(short)(keyset_index*KEYSET_OBJECT_SIZE + KEYSET_OFFSET_MINT_INDEX)]) == index) {
                 // the mint is still referenced by a keyset!
-                ISOException.throwIt(SW_OPERATION_NOT_ALLOWED); // todo: use more specific code?
+                ISOException.throwIt(SW_OPERATION_NOT_ALLOWED);
             }
         }
 
@@ -1207,13 +1221,15 @@ public class Satocash extends javacard.framework.Applet {
      *
      */
     private short satocashImportKeyset(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_CHANGE_STATE) == PIN_POLICY_MASK_CHANGE_STATE) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
 
         // check that there are still keyset slot available
         if (NB_KEYSETS >= MAX_NB_KEYSETS)
-            ISOException.throwIt(SW_NO_MEMORY_LEFT); // todo: use more specific error?
+            ISOException.throwIt(SW_NO_MEMORY_LEFT);
 
         // check input size
         short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
@@ -1275,10 +1291,11 @@ public class Satocash extends javacard.framework.Applet {
      *  Exceptions: 9C06 SW_UNAUTHORIZED, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER
      */
     private short satocashExportKeysets(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        // todo: remove pin requirement for this function?
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_GET_INFO) == PIN_POLICY_MASK_GET_INFO) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
 
         // check input size
         short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
@@ -1330,9 +1347,11 @@ public class Satocash extends javacard.framework.Applet {
      *  Exceptions: 9C06 SW_UNAUTHORIZED , 9C10 SW_INCORRECT_P1, 9C03 SW_OPERATION_NOT_ALLOWED
      */
     private short satocashRemoveKeyset(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_CHANGE_STATE) == PIN_POLICY_MASK_CHANGE_STATE) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
 
         // check p1 value
         byte index = buffer[ISO7816.OFFSET_P1];
@@ -1345,7 +1364,7 @@ public class Satocash extends javacard.framework.Applet {
                 // check if the keyset is still referenced by an unspent proof
                 // spent proof are basically only kept as backup
                 if ((proofs[(short)(proof_index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)]) == STATE_UNSPENT)
-                    ISOException.throwIt(SW_OPERATION_NOT_ALLOWED); // todo: use more specific code?
+                    ISOException.throwIt(SW_OPERATION_NOT_ALLOWED);
             }
         }
 
@@ -1367,12 +1386,15 @@ public class Satocash extends javacard.framework.Applet {
      *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C01 SW_NO_MEMORY_LEFT, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER
      */
     private short satocashImportProof(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // todo: pin required?
+        // if PIN policy requires it, check that PIN has been entered previously
+//        if ((pin_policy & PIN_POLICY_MASK_CHANGE_STATE) == PIN_POLICY_MASK_CHANGE_STATE) {
+//            if (!pin.isValidated())
+//                ISOException.throwIt(SW_UNAUTHORIZED);
+//        }
 
         // check that there are still proof slot available
-        if (NB_PROOFS_SPENT + NB_PROOFS_UNSPENT >= MAX_NB_PROOFS)
+        if ((short)(NB_PROOFS_SPENT + NB_PROOFS_UNSPENT) >= MAX_NB_PROOFS)
             ISOException.throwIt(SW_NO_MEMORY_LEFT); // todo: use more specific error?
 
         // check input size
@@ -1419,7 +1441,7 @@ public class Satocash extends javacard.framework.Applet {
         }
 
         if (found_slot_state == STATE_UNSPENT)
-            ISOException.throwIt(SW_NO_MEMORY_LEFT); // todo: use more specific error
+            ISOException.throwIt(SW_NO_MEMORY_LEFT);
 
         // copy proof in available slot
         proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)] = keyset_index;
@@ -1454,9 +1476,12 @@ public class Satocash extends javacard.framework.Applet {
      *  exceptions (OP_PROCESS): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 9C13 SW_INCORRECT_INITIALIZATION,
      */
     private short satocashExportProofs(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT) {
+            // todo: check if amount>amount_allowed
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
 
         byte p2= buffer[ISO7816.OFFSET_P2];
         if (p2 < OP_INIT || p2 > OP_PROCESS)
@@ -1574,9 +1599,11 @@ public class Satocash extends javacard.framework.Applet {
      *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C0F SW_INVALID_PARAMETER, 6700 SW_WRONG_LENGTH,
      */
     private short satocashGetProofInfo(APDU apdu, byte[] buffer) {
-        // check that PIN has been entered previously
-        if (!pin.isValidated())
-            ISOException.throwIt(SW_UNAUTHORIZED);
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_GET_INFO) == PIN_POLICY_MASK_GET_INFO) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
 
         // check input size
         short index_start = 0;
@@ -1591,7 +1618,7 @@ public class Satocash extends javacard.framework.Applet {
             else
                 index_size = CHUNK_SIZE;
 
-        } if (bytesLeft >= 4){
+        } else if (bytesLeft >= 4){
             // get & check index
             index_start = Util.getShort(buffer, buffer_offset);
             if (index_start<0 || index_start>= MAX_NB_PROOFS)
@@ -2091,6 +2118,64 @@ public class Satocash extends javacard.framework.Applet {
 
         return (short)0;
     }
+
+
+    /**
+     * This function sets the PIN policy
+     * By default, PIN is required to change state or make payment
+     * PIN must be validated to call this function.
+     * PIN policy is defined with 1 byte mask
+     *
+     *
+     *  ins: 0x3A
+     *  p1: PIN policy
+     *  p2: RFU
+     *  data: (none)
+     *  return: (none)
+     */
+    private short setPinPolicy(APDU apdu, byte[] buffer){
+        // check that PIN has been entered previously
+        if (!pin.isValidated())
+            ISOException.throwIt(SW_UNAUTHORIZED);
+
+        // get new PIN policy from P1
+        pin_policy = buffer[ISO7816.OFFSET_P1];
+
+        return (short)0;
+    }
+
+    /**
+     * This function sets the max amount that can be spent without asking for PIN.
+     * Once this amount has been spent, a PIN is required for any additional payment.
+     * Amount limit can then be reset again.
+     * If amount is [0xff, 0xff, 0xff, 0xff], then PIN is never required.
+     * PIN must be validated to call this function.
+     *
+     *  ins: 0x3B
+     *  p1: RFU
+     *  p2: RFU
+     *  data: [amount(4b)]
+     *  return: (none)
+     */
+    private short setPinlessAmount(APDU apdu, byte[] buffer){
+        // check that PIN has been entered previously
+        if (!pin.isValidated())
+            ISOException.throwIt(SW_UNAUTHORIZED);
+
+        short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
+        short buffer_offset = ISO7816.OFFSET_CDATA;
+        if (bytesLeft < 4){
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+
+        // copy array
+        Util.arrayCopy(buffer, buffer_offset, pin_policy_amount_left, (short)0, (short) 4);
+
+        return (short)0;
+    }
+
+// todo: amount policy: spending amount allowed before requiring pin
+
 
     /**
      * DEPRECATED - use exportAuthentikey() instead.
