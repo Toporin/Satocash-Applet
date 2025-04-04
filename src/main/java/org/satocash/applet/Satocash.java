@@ -318,10 +318,10 @@ public class Satocash extends javacard.framework.Applet {
     // Mints table
     private byte[] mints;
     private static final byte MAX_NB_MINTS = 16; // todo: configurable in constructor, should fit in 1 byte!
-    private static final byte MAX_MINT_URL_SIZE = 32; // todo: configurable in constructor
-    private static final byte MINT_OBJECT_SIZE = 33;
+    private static final byte MAX_MINT_URL_SIZE = 48; // todo: configurable in constructor
+    private static final byte MINT_OBJECT_SIZE = MAX_MINT_URL_SIZE+1;
     private static final byte MINT_OFFSET_URLSIZE = 0; // 1 byte
-    private static final byte MINT_OFFSET_URL = 1; // max 32 bytes
+    private static final byte MINT_OFFSET_URL = 1; // max MAX_MINT_URL_SIZE bytes
 
     // Keysets table
     private byte[] keysets;
