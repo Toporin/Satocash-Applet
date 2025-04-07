@@ -334,12 +334,13 @@ public class Satocash extends javacard.framework.Applet {
     // Proofs table
     private byte[] proofs;
     private static final short MAX_NB_PROOFS = 128; // todo: configurable in constructor
-    private static final byte PROOF_OBJECT_SIZE = 67;
+    private static final byte PROOF_OBJECT_SIZE = 68;
     private static final byte PROOF_OFFSET_STATE = 0; // 1 byte
     private static final byte PROOF_OFFSET_KEYSET_INDEX = 1; // 1 byte
     private static final byte PROOF_OFFSET_AMOUNT_EXPONENT = 2; // 1 byte
-    private static final byte PROOF_OFFSET_SECRET = 3; // 32 bytes
-    private static final byte PROOF_OFFSET_UNBLINDED_KEY = 35; // 32 bytes
+    private static final byte PROOF_OFFSET_UNBLINDED_KEY = 3; // 33 bytes
+    private static final byte PROOF_OFFSET_SECRET = 36; // 32 bytes
+
 
     // Proofs export index list
     private short[] proof_export_list;
@@ -1380,7 +1381,7 @@ public class Satocash extends javacard.framework.Applet {
      *  ins: 0xB7
      *  p1: RFU
      *  p2: RFU
-     *  data: [keyset_index(1b) | amount_exponent(1b) | secret(32b) | unblinded_key(32b)]
+     *  data: [keyset_index(1b) | amount_exponent(1b) | unblinded_key(33b) | secret(32b)]
      *  return: [index(2b)]
      *
      *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C01 SW_NO_MEMORY_LEFT, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER
@@ -1447,8 +1448,8 @@ public class Satocash extends javacard.framework.Applet {
         proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)] = keyset_index;
         proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)] = amount_exponent;
         // copy secret & unblinded key
-        Util.arrayCopy(buffer, buffer_offset, proofs, (short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_SECRET), (short) 64);
-        buffer_offset+=(short)64;
+        Util.arrayCopy(buffer, buffer_offset, proofs, (short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_UNBLINDED_KEY), (short) 65);
+        buffer_offset+=(short)65;
 
         // update state
         proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] = STATE_UNSPENT;
@@ -1470,7 +1471,7 @@ public class Satocash extends javacard.framework.Applet {
      *  data (OP_INIT): [ proof_index_list_size(1b) | proof_index(2b) ... | 2FA_size(1b) | 2FA ] else
      *  data (OP_PROCESS): []
      *
-     *  return: [proof_index(2b) | proof_state(1b) | keyset_index(1b) | amount_exponent(1b) | secret(32b) | unblinded_key(32b)]
+     *  return: [proof_index(2b) | proof_state(1b) | keyset_index(1b) | amount_exponent(1b) | unblinded_key(33b) | secret(32b)]
      *
      *  exceptions (OP_INIT): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER,
      *  exceptions (OP_PROCESS): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 9C13 SW_INCORRECT_INITIALIZATION,
