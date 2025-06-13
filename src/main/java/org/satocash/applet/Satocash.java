@@ -143,7 +143,10 @@ public class Satocash extends javacard.framework.Applet {
     
     // reset to factory settings
     private final static byte INS_RESET_TO_FACTORY = (byte) 0xFF;
-    
+
+    // reserved (response APDU chaining)
+    private final static byte INS_RESERVED = (byte) 0xC0;
+
     /****************************************
      *          Error codes                 *
      ****************************************/
@@ -964,6 +967,26 @@ public class Satocash extends javacard.framework.Applet {
         // currently, we do NOT erase logs, but we add an entry for the reset
         logger.createLog(INS_RESET_TO_FACTORY, (short)-1, (short)-1, (short)0x0000 );
         
+        // reset proofs, mints & keysets
+        Util.arrayFillNonAtomic(proofs, (short)0, (short)proofs.length, (byte)0);
+        Util.arrayFillNonAtomic(keysets, (short)0, (short)keysets.length, (byte)0);
+        Util.arrayFillNonAtomic(mints, (short)0, (short)mints.length, (byte)0);
+
+        // reset export list
+        short index;
+        for (index=0; index<proof_export_list.length; index++){
+            proof_export_list[index] = (short)0;
+        }
+        proof_export_index = 0;
+        proof_export_size = 0;
+        proof_export_flag = false;
+
+        // reset other satocash status variables
+        NB_MINTS = 0;
+        NB_KEYSETS = 0;
+        NB_PROOFS_UNSPENT = 0;
+        NB_PROOFS_SPENT = 0;
+
         // reset all secrets in store
         om_secrets.resetObjectManager(true);
         
@@ -992,7 +1015,7 @@ public class Satocash extends javacard.framework.Applet {
      * This function retrieves general information about the Applet running on the smart
      * card, and useful information about the status of current session
      *
-     *  ins: 0x3C
+     *  ins: 0xB0
      *  p1: 0x00
      *  p2: 0x00
      *  data: none
