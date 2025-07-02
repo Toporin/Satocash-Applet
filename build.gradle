@@ -38,7 +38,7 @@ repositories {
 dependencies {
 }
 
-task install (type: org.satopay.build.InstallTask)
+task install (type: org.satocash.build.InstallTask)
 tasks.install.dependsOn(convertJavacard)
 
 compileJava {
