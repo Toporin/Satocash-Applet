@@ -59,11 +59,12 @@ public class Satocash extends javacard.framework.Applet {
      * APPLET VERSION:   changes with no impact on compatibility of the client
      *
      * 0.1-0.1: (WIP) initial version
+     * 0.1-0.2: (WIP) support import authentikey during personalization. This key can be shared by multiple devices for privacy.
      */
     private final static byte PROTOCOL_MAJOR_VERSION = (byte) 0; 
     private final static byte PROTOCOL_MINOR_VERSION = (byte) 1;
     private final static byte APPLET_MAJOR_VERSION = (byte) 0;
-    private final static byte APPLET_MINOR_VERSION = (byte) 1;   
+    private final static byte APPLET_MINOR_VERSION = (byte) 2;
 
     // Maximum size for the extended APDU buffer 
     private final static short EXT_APDU_BUFFER_SIZE = (short) 320;
@@ -138,6 +139,7 @@ public class Satocash extends javacard.framework.Applet {
     private final static byte INS_EXPORT_PKI_CERTIFICATE = (byte) 0x93;
     private final static byte INS_SIGN_PKI_CSR = (byte) 0x94;
     private final static byte INS_EXPORT_PKI_PUBKEY = (byte) 0x98;
+    private final static byte INS_IMPORT_PKI_NDEF_AUTHENTIKEY = (byte) 0x9B;
     private final static byte INS_LOCK_PKI = (byte) 0x99;
     private final static byte INS_CHALLENGE_RESPONSE_PKI= (byte) 0x9A;
     
@@ -311,6 +313,7 @@ public class Satocash extends javacard.framework.Applet {
      *  BIP32 Hierarchical Deterministic Wallet  *
      *********************************************/
 
+    private static final short SIZE_ECPRIVKEY= (short)32;
     private static final short BIP32_KEY_SIZE= 32; // size of extended key and chain code is 256 bits
 
 
@@ -393,7 +396,9 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte[] CST_SC = {'s','c','_','k','e','y', 's','c','_','m','a','c'};
     private boolean needs_secure_channel= true;
     private boolean initialized_secure_channel= false;
-    private ECPrivateKey sc_ephemeralkey; 
+    //private ECPrivateKey sc_ephemeralkey;
+    private ECPrivateKey ephemeral_privkey;
+    private boolean ephemeral_privkey_transient = false;
     private AESKey sc_sessionkey;
     private Cipher sc_aes128_cbc;
     private byte[] sc_buffer;
@@ -525,14 +530,16 @@ public class Satocash extends javacard.framework.Applet {
 
         try {
             // Put the EC key in RAM if we can.
-            sc_ephemeralkey= (ECPrivateKey) KeyBuilder.buildKey(TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, LENGTH_EC_FP_256, false);
+            ephemeral_privkey= (ECPrivateKey) KeyBuilder.buildKey(TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, LENGTH_EC_FP_256, false);
+            ephemeral_privkey_transient = true;
         } catch (CryptoException e) {
             try {
                 // This uses a bit more RAM, but at least it isn't using flash.
-                sc_ephemeralkey= (ECPrivateKey) KeyBuilder.buildKey(TYPE_EC_FP_PRIVATE_TRANSIENT_RESET, LENGTH_EC_FP_256, false);
+                ephemeral_privkey= (ECPrivateKey) KeyBuilder.buildKey(TYPE_EC_FP_PRIVATE_TRANSIENT_RESET, LENGTH_EC_FP_256, false);
+                ephemeral_privkey_transient = true;
             } catch (CryptoException x) {
                 // Last option as it will wear out the flash eventually
-                sc_ephemeralkey= (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, LENGTH_EC_FP_256, false);
+                ephemeral_privkey= (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, LENGTH_EC_FP_256, false);
             }
         }
         sc_aes128_cbc= Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
@@ -773,6 +780,9 @@ public class Satocash extends javacard.framework.Applet {
             case INS_SIGN_PKI_CSR:
                 sizeout= sign_PKI_CSR(apdu, buffer);
                 break;
+            case INS_IMPORT_PKI_NDEF_AUTHENTIKEY:
+                sizeout= import_PKI_ndef_authentikey(apdu, buffer);
+                break;
             case INS_LOCK_PKI:
                 sizeout= lock_PKI(apdu, buffer);
                 break;
@@ -966,7 +976,7 @@ public class Satocash extends javacard.framework.Applet {
         // logs
         // currently, we do NOT erase logs, but we add an entry for the reset
         logger.createLog(INS_RESET_TO_FACTORY, (short)-1, (short)-1, (short)0x0000 );
-        
+
         // reset proofs, mints & keysets
         Util.arrayFillNonAtomic(proofs, (short)0, (short)proofs.length, (byte)0);
         Util.arrayFillNonAtomic(keysets, (short)0, (short)keysets.length, (byte)0);
@@ -2277,13 +2287,14 @@ public class Satocash extends javacard.framework.Applet {
             ISOException.throwIt(SW_INVALID_PARAMETER);
 
         // generate a new ephemeral key
-        sc_ephemeralkey.clearKey(); //todo: simply generate new random S param instead?
-        Secp256k1.setCommonCurveParameters(sc_ephemeralkey);// keep public params!
-        randomData.generateData(recvBuffer, (short)0, BIP32_KEY_SIZE);
-        sc_ephemeralkey.setS(recvBuffer, (short)0, BIP32_KEY_SIZE); //random value first
+        if (ephemeral_privkey_transient) {
+            Secp256k1.setCommonCurveParameters(ephemeral_privkey);
+        }
+        randomData.generateData(recvBuffer, (short)0, SIZE_ECPRIVKEY);
+        ephemeral_privkey.setS(recvBuffer, (short)0, SIZE_ECPRIVKEY); //random value first
 
         // compute the shared secret...
-        keyAgreement.init(sc_ephemeralkey);        
+        keyAgreement.init(ephemeral_privkey);
         keyAgreement.generateSecret(buffer, ISO7816.OFFSET_CDATA, (short) 65, recvBuffer, (short)0); //pubkey in uncompressed form
         // derive sc_sessionkey & sc_mackey
         HmacSha160.computeHmacSha160(recvBuffer, (short)1, (short)32, CST_SC, (short)6, (short)6, recvBuffer, (short)33);
@@ -2297,7 +2308,7 @@ public class Satocash extends javacard.framework.Applet {
         // self signed ephemeral pubkey
         keyAgreement.generateSecret(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_G, (short) 65, buffer, (short)1); //pubkey in uncompressed form
         Util.setShort(buffer, (short)0, BIP32_KEY_SIZE);
-        sigECDSA.init(sc_ephemeralkey, Signature.MODE_SIGN);
+        sigECDSA.init(ephemeral_privkey, Signature.MODE_SIGN);
         short sign_size= sigECDSA.sign(buffer, (short)0, (short)(BIP32_KEY_SIZE+2), buffer, (short)(BIP32_KEY_SIZE+4));
         Util.setShort(buffer, (short)(BIP32_KEY_SIZE+2), sign_size);
 
@@ -2539,7 +2550,48 @@ public class Satocash extends javacard.framework.Applet {
                 return (short)0; 
         }
     }
-    
+
+    /**
+     * This function import the ECDSA secp256k1 NDEF authentikey private key during personalization.
+     * This private key is used to authenticate NDEF records.
+     * For privacy reason, this key is shared by multiple devices.
+     *
+     *
+     *  ins: 0xB
+     *  p1: rfu
+     *  p2: rfu
+     *  data: [ privkey (32b) ]
+     *  return: [none]
+     */
+    private short import_PKI_ndef_authentikey(APDU apdu, byte[] buffer) {
+
+        if (personalizationDone)
+            ISOException.throwIt(SW_PKI_ALREADY_LOCKED);
+
+        short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
+        if (bytesLeft < (short)32)
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+        // overwrite authentikey with privkey
+        // for Satocash, we can use the same authentikey for multiple cards, for better privacy
+        authentikey_private.setS(buffer, ISO7816.OFFSET_CDATA, SIZE_ECPRIVKEY);
+
+        // recover (uncompressed) pubkey
+        short offset = (short)0;
+        keyAgreement.init(authentikey_private);
+        keyAgreement.generateSecret(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_G, (short) 65, buffer, offset);
+        authentikey_public.setW(buffer, offset, (short)65);
+
+//        // compress pubkey
+//        if (buffer[(short)(offset+64)]%2 == 0){
+//            buffer[offset] = (byte)0x02;
+//        } else {
+//            buffer[offset] = (byte)0x03;
+//        }
+
+        return (short)0;
+    }
+
     /**
      * This function locks the PKI config.
      * Once it is locked, it is not possible to modify private key, certificate or allowed_card_AID.
