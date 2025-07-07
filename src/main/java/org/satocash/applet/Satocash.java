@@ -1495,7 +1495,7 @@ public class Satocash extends javacard.framework.Applet {
      *
      *  ins: 0xB8
      *  p1: RFU
-     *  p2: OP_INIT | OP_PROCESS
+     *  p2: OP_INIT | OP_PROCESS | OP_FINALIZE
      *  data (OP_INIT): [ proof_index_list_size(1b) | proof_index(2b) ... | 2FA_size(1b) | 2FA ] else
      *  data (OP_PROCESS): []
      *  data (OP_FINALIZE): []
