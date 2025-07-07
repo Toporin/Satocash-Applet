@@ -231,6 +231,9 @@ public class Satocash extends javacard.framework.Applet {
     /** Satocash errors */
     private final static short SW_OBJECT_ALREADY_PRESENT = (short) 0x9C60;
 
+    /** Math error */
+    private final static short SW_MATH_OVERFLOW = (short) 0x9999;
+
 
     // KeyBlob Encoding in Key Blobs
     //private final static byte BLOB_ENC_PLAIN = (byte) 0x00;
@@ -337,6 +340,7 @@ public class Satocash extends javacard.framework.Applet {
     // Proofs table
     private byte[] proofs;
     private static final short MAX_NB_PROOFS = 128; // todo: configurable in constructor
+    private static final byte MAX_PROOF_EXPONENT = 24; // 2^24 * 2^7 == 2^31
     private static final byte PROOF_OBJECT_SIZE = 68;
     private static final byte PROOF_OFFSET_STATE = 0; // 1 byte
     private static final byte PROOF_OFFSET_KEYSET_INDEX = 1; // 1 byte
@@ -418,7 +422,7 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte PIN_POLICY_MASK_GET_INFO = 0x01; //
     private static final byte PIN_POLICY_MASK_CHANGE_STATE = 0x02;
     private static final byte PIN_POLICY_MASK_MAKE_PAYMENT = 0x04;
-    private byte[] pin_policy_amount_left; // todo: set limit for pinless payment
+    private byte[] pin_policy_amount_threshold;
     // todo: policy to require authentication for payment?
 
     // NFC 
@@ -466,7 +470,7 @@ public class Satocash extends javacard.framework.Applet {
 
         // default PIN policy: require pin to change state or make payment
         pin_policy = PIN_POLICY_MASK_CHANGE_STATE | PIN_POLICY_MASK_MAKE_PAYMENT;
-        pin_policy_amount_left = new byte[4];
+        pin_policy_amount_threshold = new byte[4];
 
         // Temporary working arrays
         try {
@@ -1083,7 +1087,7 @@ public class Satocash extends javacard.framework.Applet {
         pos+=2;
         Util.setShort(buffer, pos, NB_PROOFS_SPENT);
         pos+=2;
-        // todo max amount allowed without PIN (pin_policy_amount_left)
+        // todo max amount allowed without PIN (pin_policy_amount_threshold)
         return pos;
     }
 
@@ -1437,7 +1441,7 @@ public class Satocash extends javacard.framework.Applet {
 
         // check amount exponent
         byte amount_exponent = buffer[buffer_offset++];
-        if (amount_exponent<0)
+        if (amount_exponent<0 || amount_exponent>MAX_PROOF_EXPONENT)
             ISOException.throwIt(SW_INVALID_PARAMETER); // todo: amount_exponent can be <0 (would represent a negative power of 2)?
 
         // todo: check if proof already present?
@@ -1500,13 +1504,6 @@ public class Satocash extends javacard.framework.Applet {
      *  exceptions (OP_PROCESS): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 9C13 SW_INCORRECT_INITIALIZATION,
      */
     private short satocashExportProofs(APDU apdu, byte[] buffer) {
-        // if PIN policy requires it, check that PIN has been entered previously
-        if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT) {
-            // todo: check if amount>amount_allowed
-            if (!pin.isValidated())
-                ISOException.throwIt(SW_UNAUTHORIZED);
-        }
-
         byte p2= buffer[ISO7816.OFFSET_P2];
         if (p2 < OP_INIT || p2 > OP_PROCESS)
             ISOException.throwIt(SW_INCORRECT_P2);
@@ -1535,14 +1532,42 @@ public class Satocash extends javacard.framework.Applet {
 
                 // copy list in array and save in state for next APDU calls
                 short index_out=0;
+                Util.arrayFillNonAtomic(tmpBuffer, (short)0, (short)4, (byte)0x00);
+                
                 for (short index_in= 0; index_in<proof_index_list_size; index_in++) {
+                    
                     short index_proof = Util.getShort(buffer, (short)(buffer_offset+2*index_in));
                     // check index_proof
                     if (index_proof<0 || index_proof>= MAX_NB_PROOFS)
                         ISOException.throwIt(SW_INVALID_PARAMETER);
+
+                    // Get the amount of the proof and accumulate it into `tmpBuffer`
+                    // Amount exponent needs to be converted to a number
+                    Util.arrayFillNonAtomic(tmpBuffer2, (short)0, (short)4, (byte)0x00);
+                    byte exponent = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)];
+                    if (exponent != 0xFF) {
+                        byte div = (byte)(exponent >> 3);
+                        byte rem = (byte)(exponent & 7);
+                        // div can't be > 3 because we check the exponent size in `satocashImportProof`
+                        // array must be set MSB, hence why the `3-div` indexing
+                        tmpBuffer2[3-div] = (byte)(1 << rem);
+                        if (Biginteger.add_carry(tmpBuffer, (short)0, tmpBuffer2, (short)0, (short)4)) {
+                            ISOException.throwIt(SW_MATH_OVERFLOW);
+                        }
+                    }
                     // save index_proof in state
                     proof_export_list[index_out++] = index_proof;
                 }
+
+                // if PIN policy requires it, check that PIN has been entered previously
+                if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT) {
+                    if (
+                        Biginteger.lessThan(pin_policy_amount_threshold, (short)0, tmpBuffer, (short)0, (short)4)
+                        && !pin.isValidated()
+                    )
+                        ISOException.throwIt(SW_UNAUTHORIZED);
+                }
+
                 proof_export_size = proof_index_list_size;
                 proof_export_index = 0;
                 proof_export_flag = true;
@@ -1579,7 +1604,6 @@ public class Satocash extends javacard.framework.Applet {
                         Util.arrayFillNonAtomic(buffer, buffer_offset, PROOF_OBJECT_SIZE, (byte)0x00);
                         //buffer[buffer_offset] = STATE_EMPTY; // update state, not needed as STATE_EMPTY == 0x00
                         buffer_offset+= PROOF_OBJECT_SIZE;
-
                     } else {
                         // export proof data
                         Util.setShort(buffer, buffer_offset, index_proof);
@@ -2193,7 +2217,7 @@ public class Satocash extends javacard.framework.Applet {
         }
 
         // copy array
-        Util.arrayCopy(buffer, buffer_offset, pin_policy_amount_left, (short)0, (short) 4);
+        Util.arrayCopy(buffer, buffer_offset, pin_policy_amount_threshold, (short)0, (short) 4);
 
         return (short)0;
     }
