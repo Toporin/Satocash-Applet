@@ -349,7 +349,7 @@ public class Satocash extends javacard.framework.Applet {
     private short[] proof_export_list;
     private short proof_export_index;
     private short proof_export_size;
-    private boolean proof_export_flag = false; // set to true when export is ongoing
+    private byte[] proof_export_flag; // set to true when export is ongoing
     private static final short MAX_PROOF_EXPORT_LIST_SIZE = 64;
 
 
@@ -488,6 +488,12 @@ public class Satocash extends javacard.framework.Applet {
             // This is the fallback method, but its usage is really not
             // recommended as after ~ 100000 writes it will kill the EEPROM cells...
             recvBuffer = new byte[EXT_APDU_BUFFER_SIZE];
+        }
+
+        try {
+            proof_export_flag = JCSystem.makeTransientByteArray((short)1, JCSystem.CLEAR_ON_DESELECT);
+        } catch (SystemException e) {
+            proof_export_flag = new byte[1];
         }
 
         // shared cryptographic objects
@@ -979,7 +985,6 @@ public class Satocash extends javacard.framework.Applet {
         }
         proof_export_index = 0;
         proof_export_size = 0;
-        proof_export_flag = false;
 
         // reset other satocash status variables
         NB_MINTS = 0;
@@ -1493,11 +1498,13 @@ public class Satocash extends javacard.framework.Applet {
      *  p2: OP_INIT | OP_PROCESS
      *  data (OP_INIT): [ proof_index_list_size(1b) | proof_index(2b) ... | 2FA_size(1b) | 2FA ] else
      *  data (OP_PROCESS): []
+     *  data (OP_FINALIZE): []
      *
      *  return: [proof_index(2b) | proof_state(1b) | keyset_index(1b) | amount_exponent(1b) | unblinded_key(33b) | secret(32b)]
      *
      *  exceptions (OP_INIT): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER,
      *  exceptions (OP_PROCESS): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 9C13 SW_INCORRECT_INITIALIZATION,
+     *  exceptions (OP_FINALIZE): 9C13 SW_INCORRECT_INITIALIZATION
      */
     private short satocashExportProofs(APDU apdu, byte[] buffer) {
         // if PIN policy requires it, check that PIN has been entered previously
@@ -1545,7 +1552,7 @@ public class Satocash extends javacard.framework.Applet {
                 }
                 proof_export_size = proof_index_list_size;
                 proof_export_index = 0;
-                proof_export_flag = true;
+                proof_export_flag[0] = (byte)1;
 
                 // note: intentional fallthrough
                 // without the 'break' instruction, we fall through the OP_PROCESS phase directly, thus saving one APDU call...
@@ -1554,7 +1561,7 @@ public class Satocash extends javacard.framework.Applet {
             case OP_PROCESS:
 
                 // check flag
-                if (!proof_export_flag)
+                if (proof_export_flag[0] != (byte)1)
                     ISOException.throwIt(SW_INCORRECT_INITIALIZATION);
 
                 // prepare output buffer
@@ -1578,7 +1585,7 @@ public class Satocash extends javacard.framework.Applet {
                         buffer_offset+=2;
                         Util.arrayFillNonAtomic(buffer, buffer_offset, PROOF_OBJECT_SIZE, (byte)0x00);
                         //buffer[buffer_offset] = STATE_EMPTY; // update state, not needed as STATE_EMPTY == 0x00
-                        buffer_offset+= PROOF_OBJECT_SIZE;
+                        buffer_offset += PROOF_OBJECT_SIZE;
 
                     } else {
                         // export proof data
@@ -1586,20 +1593,34 @@ public class Satocash extends javacard.framework.Applet {
                         buffer_offset+=2;
                         Util.arrayCopy(proofs, proof_offset_state, buffer, buffer_offset, PROOF_OBJECT_SIZE);
                         buffer_offset+= PROOF_OBJECT_SIZE;
-                        // if proof was unspent, change its state to spent
-                        if (proofs[proof_offset_state] == STATE_UNSPENT) {
-                            proofs[proof_offset_state] = STATE_SPENT;
-                            NB_PROOFS_SPENT++;
-                            NB_PROOFS_UNSPENT--;
-                        }
                     }
                 } // end for
 
-                // if all proofs have been exported, set export flag to false
-                if (proof_export_index >= proof_export_size)
-                    proof_export_flag = false;
-
                 return buffer_offset;
+            
+            case OP_FINALIZE:
+                // check flag
+                if (proof_export_flag[0] != (byte)1)
+                    ISOException.throwIt(SW_INCORRECT_INITIALIZATION);
+
+                for (byte i = 0; i < proof_export_size; i++) {
+                    // get index_proof from state
+                    short index_proof = proof_export_list[i];
+                    
+                    short proof_offset_state = (short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE);
+
+                    // if proof was unspent, change its state to spent
+                    if (proofs[proof_offset_state] == STATE_UNSPENT) {
+                        proofs[proof_offset_state] = STATE_SPENT;
+                        NB_PROOFS_SPENT++;
+                        NB_PROOFS_UNSPENT--;
+                    }
+                }
+
+                // Reset flag
+                proof_export_flag[0] = (byte)0;
+
+                return 0;
 
             default:
                 ISOException.throwIt(SW_INCORRECT_P2);
