@@ -1546,10 +1546,10 @@ public class Satocash extends javacard.framework.Applet {
                     Util.arrayFillNonAtomic(tmpBuffer2, (short)0, (short)4, (byte)0x00);
                     byte exponent = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)];
                     if (exponent != 0xFF) {
+                        // exponent can't be > 24
                         byte div = (byte)(exponent >> 3);
-                        byte rem = (byte)(exponent & 7);
-                        // div can't be > 3 because we check the exponent size in `satocashImportProof`
-                        // array must be set MSB, hence why the `3-div` indexing
+                        // div can't be > 3
+                        byte rem = (byte)(exponent - 8*div);
                         tmpBuffer2[3-div] = (byte)(1 << rem);
                         if (Biginteger.add_carry(tmpBuffer, (short)0, tmpBuffer2, (short)0, (short)4)) {
                             ISOException.throwIt(SW_MATH_OVERFLOW);
