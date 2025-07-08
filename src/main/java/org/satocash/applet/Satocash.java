@@ -31,6 +31,8 @@
 
 package org.satocash.applet;
 
+import javax.print.attribute.standard.MediaSize.ISO;
+
 import javacard.framework.APDU;
 import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
@@ -234,6 +236,9 @@ public class Satocash extends javacard.framework.Applet {
     /** Math error */
     private final static short SW_MATH_OVERFLOW = (short) 0x9999;
 
+    /** Multiple units error */
+    private final static short SW_MULTIPLE_UNITS = (short) 0x9990;
+
 
     // KeyBlob Encoding in Key Blobs
     //private final static byte BLOB_ENC_PLAIN = (byte) 0x00;
@@ -380,6 +385,7 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte UNIT_MSAT = 2;
     private static final byte UNIT_USD = 3;
     private static final byte UNIT_EUR = 4;
+    private static final short UNITS_LENGTH = 4;
     private static final byte AMOUNT_NULL = (byte) 0xff;
 
     // metadata_type constants
@@ -423,6 +429,7 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte PIN_POLICY_MASK_CHANGE_STATE = 0x02;
     private static final byte PIN_POLICY_MASK_MAKE_PAYMENT = 0x04;
     private byte[] pin_policy_amount_threshold;
+    private static final short PIN_POLICY_AMOUNT_THRESHOLD_SIZE = 0x04;
     // todo: policy to require authentication for payment?
 
     // NFC 
@@ -470,7 +477,8 @@ public class Satocash extends javacard.framework.Applet {
 
         // default PIN policy: require pin to change state or make payment
         pin_policy = PIN_POLICY_MASK_CHANGE_STATE | PIN_POLICY_MASK_MAKE_PAYMENT;
-        pin_policy_amount_threshold = new byte[4];
+        // Threshold for all units requires allocating (how_many_units) * (bytes for threshold) bytes
+        pin_policy_amount_threshold = new byte[UNITS_LENGTH * PIN_POLICY_AMOUNT_THRESHOLD_SIZE];
 
         // Temporary working arrays
         try {
@@ -1531,15 +1539,34 @@ public class Satocash extends javacard.framework.Applet {
                 // idea: compute hash of available proof data (index, keyset_id, amount_exponent) and uses this as challenge
 
                 // copy list in array and save in state for next APDU calls
-                short index_out=0;
+                short index_out = 0;
+                byte selected_unit = UNIT_NONE;
                 Util.arrayFillNonAtomic(tmpBuffer, (short)0, (short)4, (byte)0x00);
-                
-                for (short index_in= 0; index_in<proof_index_list_size; index_in++) {
+
+                for (short index_in = 0; index_in < proof_index_list_size; index_in++) {
                     
                     short index_proof = Util.getShort(buffer, (short)(buffer_offset+2*index_in));
+                    
                     // check index_proof
                     if (index_proof<0 || index_proof>= MAX_NB_PROOFS)
                         ISOException.throwIt(SW_INVALID_PARAMETER);
+
+
+                    // unit from the first proof is the reference for future proofs
+                    if (index_in == 0) {
+                        byte index_selected_keyset = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)];
+                        selected_unit = keysets[(short)(index_selected_keyset * KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
+                        if (selected_unit == UNIT_NONE) {
+                            ISOException.throwIt(SW_INVALID_PARAMETER);
+                        }
+                    }
+
+                    // if the unit is not the same, throw an error
+                    byte index_keyset = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)];
+                    byte unit = keysets[(short)(index_keyset * KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
+                    if (unit != selected_unit) {
+                        ISOException.throwIt(SW_MULTIPLE_UNITS);
+                    }
 
                     // Get the amount of the proof and accumulate it into `tmpBuffer`
                     // Amount exponent needs to be converted to a number
@@ -1561,8 +1588,10 @@ public class Satocash extends javacard.framework.Applet {
 
                 // if PIN policy requires it, check that PIN has been entered previously
                 if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT) {
+                    
+                    // Compare the pin_policy_amount_threshold for the selected unit
                     if (
-                        Biginteger.lessThan(pin_policy_amount_threshold, (short)0, tmpBuffer, (short)0, (short)4)
+                        Biginteger.lessThan(pin_policy_amount_threshold, (short)((selected_unit-1) * PIN_POLICY_AMOUNT_THRESHOLD_SIZE), tmpBuffer, (short)0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)
                         && !pin.isValidated()
                     )
                         ISOException.throwIt(SW_UNAUTHORIZED);
@@ -2201,7 +2230,7 @@ public class Satocash extends javacard.framework.Applet {
      *
      *  ins: 0x3B
      *  p1: RFU
-     *  p2: RFU
+     *  p2: unit(1b)
      *  data: [amount(4b)]
      *  return: (none)
      */
@@ -2210,14 +2239,21 @@ public class Satocash extends javacard.framework.Applet {
         if (!pin.isValidated())
             ISOException.throwIt(SW_UNAUTHORIZED);
 
+        byte unit = buffer[ISO7816.OFFSET_P2];
+        // Make sure the unit is valid
+        if (unit < UNIT_SAT || unit > UNIT_EUR) {
+            ISOException.throwIt(SW_INCORRECT_P2);
+        }
+
         short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
         short buffer_offset = ISO7816.OFFSET_CDATA;
-        if (bytesLeft < 4){
+        if (bytesLeft < PIN_POLICY_AMOUNT_THRESHOLD_SIZE){
             ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
         }
 
         // copy array
-        Util.arrayCopy(buffer, buffer_offset, pin_policy_amount_threshold, (short)0, (short) 4);
+        Util.arrayCopy(buffer, buffer_offset, pin_policy_amount_threshold, (short)((unit-1)*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
+
 
         return (short)0;
     }
