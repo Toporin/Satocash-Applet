@@ -1515,7 +1515,7 @@ public class Satocash extends javacard.framework.Applet {
         }
 
         byte p2= buffer[ISO7816.OFFSET_P2];
-        if (p2 < OP_INIT || p2 > OP_PROCESS)
+        if (p2 < OP_INIT || p2 > OP_FINALIZE)
             ISOException.throwIt(SW_INCORRECT_P2);
 
         switch (p2){
