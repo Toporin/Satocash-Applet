@@ -323,6 +323,7 @@ public class Satocash extends javacard.framework.Applet {
     private byte[] bip32_master; // 64 bytes [master_key(32b) | master_chaincode(32b)]
     private ECPrivateKey bip32_extendedkey; // object storing last extended key used
     private boolean bip32_extendedkey_transient = false;
+    private byte[] bip32_counter; // 4-byte counter for deriving nut11 P2PK keys
 
     // offset in working buffer
     // recvBuffer=[parent_chain_code (32b) | 0x00 | parent_key (32b) | buffer(index)(32b) | current_extended_key(32b) | current_chain_code(32b) | pubkey(65b)]
@@ -608,6 +609,8 @@ public class Satocash extends javacard.framework.Applet {
         // currently, no BIP39 seed used as the master key is not imported nor exported
         bip32_master = new byte[(short)64];
         randomData.generateData(bip32_master, (short)0, (short)64);
+        // bip32 counter, used for path derivation, start from 0, incremented before derivation
+        bip32_counter = new byte[(short)4];
 
         // Schnorr signatures
         // initialize Biginteger static data (required for Schnorr signatures)
@@ -1822,6 +1825,61 @@ public class Satocash extends javacard.framework.Applet {
     /****************************************
      *             BIP32 Methods            *
      ****************************************/
+
+    /**
+     * The function computes the Bip32 extended key derived from the master key and returns the
+     * x-coordinate of the public key signed by the authentikey.
+     * Extended key is stored in the chip in a temporary EC key.
+     * The path for the derivation is based on an internal counter and cannot be modified externally.
+     * Each call increment the internal counter and derives a new key.
+     *
+     * ins: 0x6D
+     * p1: 0x00 (default)
+     * p2: 0x00 (default)
+     * data: []
+     *
+     * return: [ counter(4b) | pubkey(65b) | sig_size(2b) | self-sig | sig_size(2b) | authentikey-sig]
+     *
+     * */
+    private short getBIP32ExtendedKey(APDU apdu, byte[] buffer){
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_GET_INFO) == PIN_POLICY_MASK_GET_INFO) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
+
+        // increment counter
+        boolean carry = Biginteger.add1_carry(bip32_counter, (short)0, (short)4);
+        // derive key
+        deriveBIP32ExtendedKey(bip32_counter, (short)0, (short)4);
+
+        // save counter to buffer
+        short offset = (short)0;
+        Util.arrayCopyNonAtomic(bip32_counter, offset, buffer, offset, (short)4);
+        offset+= (short)4;
+
+        // compute the corresponding partial public key...
+        keyAgreement.init(bip32_extendedkey);
+        keyAgreement.generateSecret(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_G, (short) 65, buffer, offset); //pubkey in uncompressed form
+        offset+= (short)65;
+
+        // self-sign data
+        sigECDSA.init(bip32_extendedkey, Signature.MODE_SIGN);
+        short sign_size= sigECDSA.sign(buffer, (short)0, offset, buffer, (short)(offset+2));
+        Util.setShort(buffer, offset, sign_size);
+        offset+=(short)(2+sign_size);
+
+        // data signed by authentikey
+        sigECDSA.init(authentikey_private, Signature.MODE_SIGN);
+        short sign_size2= sigECDSA.sign(buffer, (short)0, offset, buffer, (short)(offset+2));
+        Util.setShort(buffer, offset, sign_size2);
+        offset+=(short)(2+sign_size2);
+
+        // buffer=[counter(4b) | pubkey(65b) | sig_size(2b) | self-sig | sig_size(2b) | authentikey-sig]
+        return offset;
+
+    }// end of getBip32ExtendedKey()
+
 
     /**
      * The function computes the Bip32 extended key derived from the master key.
