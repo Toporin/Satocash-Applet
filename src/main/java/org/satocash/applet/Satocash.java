@@ -195,6 +195,8 @@ public class Satocash extends javacard.framework.Applet {
     private final static short SW_IDENTITY_BLOCKED = (short) 0x9C0C;
     /** For debugging purposes */
     private final static short SW_INTERNAL_ERROR = (short) 0x9CFF;
+    /** Very low probability error */
+    private final static short SW_BIP32_DERIVATION_ERROR = (short) 0x9C0E;
     /** Incorrect initialization of method */
     private final static short SW_INCORRECT_INITIALIZATION = (short) 0x9C13;
 
@@ -315,7 +317,51 @@ public class Satocash extends javacard.framework.Applet {
 
     private static final short SIZE_ECPRIVKEY= (short)32;
     private static final short BIP32_KEY_SIZE= 32; // size of extended key and chain code is 256 bits
+    private static final short BIP32_MAX_DEPTH = (short)10;
 
+    //   bip32 keys
+    private byte[] bip32_master; // 64 bytes [master_key(32b) | master_chaincode(32b)]
+    private ECPrivateKey bip32_extendedkey; // object storing last extended key used
+    private boolean bip32_extendedkey_transient = false;
+
+    // offset in working buffer
+    // recvBuffer=[parent_chain_code (32b) | 0x00 | parent_key (32b) | buffer(index)(32b) | current_extended_key(32b) | current_chain_code(32b) | pubkey(65b)]
+    private static final short BIP32_OFFSET_PARENT_CHAINCODE=0;
+    private static final short BIP32_OFFSET_PARENT_SEPARATOR=BIP32_KEY_SIZE;
+    private static final short BIP32_OFFSET_PARENT_KEY=BIP32_KEY_SIZE+1;
+    private static final short BIP32_OFFSET_INDEX= (short)(BIP32_OFFSET_PARENT_KEY+BIP32_KEY_SIZE);
+    private static final short BIP32_OFFSET_CHILD_KEY= (short)(BIP32_OFFSET_INDEX+BIP32_KEY_SIZE);
+    private static final short BIP32_OFFSET_CHILD_CHAINCODE= (short)(BIP32_OFFSET_CHILD_KEY+BIP32_KEY_SIZE);
+    private static final short BIP32_OFFSET_PUB= (short)(BIP32_OFFSET_CHILD_CHAINCODE+BIP32_KEY_SIZE);
+    private static final short BIP32_OFFSET_PUBX= (short)(BIP32_OFFSET_PUB+1);
+    private static final short BIP32_OFFSET_PUBY= (short)(BIP32_OFFSET_PUBX+BIP32_KEY_SIZE);
+    private static final short BIP32_OFFSET_END= (short)(BIP32_OFFSET_PUBY+BIP32_KEY_SIZE);
+
+    /*********************************************
+     *             Schnorr signatures            *
+     *********************************************/
+
+    // BIP0340/aux offset 0, length 11
+    // BIP0340/nonce offset 11, length 13
+    // BIP0340/challenge offset 24, length 17
+    // 'TapTweak' offset 41, length 8
+    public static final byte[] tags = {'B','I','P','0','3','4','0','/','a','u','x',  'B','I','P','0','3','4','0','/','n','o','n','c','e',  'B','I','P','0','3','4','0','/','c','h','a','l','l','e','n','g','e', 'T','a','p','T','w','e','a','k'};
+
+    // recvBuffer offset values to store intermediate values
+    // recvBuffer=[t_R(32b) | P(32b) | m(32b) | e(32b) | d(32b) | k(32b) | sk(32b) | a(32b) ]
+    // recvBuffer=[t_R(32b) | P(32b) | m(32b) | e(32b) | d(32b) | k(32b) | pubkey(65b) ]
+    public static final short OFFSET_BIP340_t_R= (short)0;
+    public static final short OFFSET_BIP340_P= (short)32;
+    public static final short OFFSET_BIP340_m= (short)64;
+    public static final short OFFSET_BIP340_e= (short)96;
+    public static final short OFFSET_BIP340_d= (short) 128;
+    public static final short OFFSET_BIP340_k= (short) 160;
+    public static final short OFFSET_BIP340_sk= (short)192; // Note: sk+a and pubkey share same memory!
+    public static final short OFFSET_BIP340_a= (short)224;
+    public static final short OFFSET_BIP340_pubkey= (short) 192; // Note: sk+a and pubkey share same memory!
+    public static final short OFFSET_BIP340_pubkeyx= (short) 193;
+    public static final short OFFSET_BIP340_pubkeyy= (short) 225;
+    public static final short OFFSET_BIP340_size= (short) 257;
 
     /*****************************************
      *               Satocash                *
@@ -540,6 +586,7 @@ public class Satocash extends javacard.framework.Applet {
             } catch (CryptoException x) {
                 // Last option as it will wear out the flash eventually
                 ephemeral_privkey= (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, LENGTH_EC_FP_256, false);
+                Secp256k1.setCommonCurveParameters(ephemeral_privkey);
             }
         }
         sc_aes128_cbc= Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
@@ -556,6 +603,32 @@ public class Satocash extends javacard.framework.Applet {
 
         // card label
         card_label= new byte[MAX_CARD_LABEL_SIZE];
+
+        // bip32 master key
+        // currently, no BIP39 seed used as the master key is not imported nor exported
+        bip32_master = new byte[(short)64];
+        randomData.generateData(bip32_master, (short)0, (short)64);
+
+        // Schnorr signatures
+        // initialize Biginteger static data (required for Schnorr signatures)
+        Biginteger.init();
+
+        try {
+            // Put the EC key in RAM if we can.
+            bip32_extendedkey= (ECPrivateKey) KeyBuilder.buildKey(TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, LENGTH_EC_FP_256, false);
+            bip32_extendedkey_transient = true;
+        } catch (CryptoException e) {
+            try {
+                // This uses a bit more RAM, but at least it isn't using flash.
+                bip32_extendedkey= (ECPrivateKey) KeyBuilder.buildKey(TYPE_EC_FP_PRIVATE_TRANSIENT_RESET, LENGTH_EC_FP_256, false);
+                bip32_extendedkey_transient = true;
+            } catch (CryptoException x) {
+                // Last option as it will wear out the flash eventually
+                bip32_extendedkey= (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, LENGTH_EC_FP_256, false);
+                Secp256k1.setCommonCurveParameters(bip32_extendedkey);
+            }
+        }
+
 
         // Satocash data
         mints = new byte[(short)(MAX_NB_MINTS*MINT_OBJECT_SIZE)];
@@ -948,9 +1021,6 @@ public class Satocash extends javacard.framework.Applet {
             base+=(short)2;
             bytesLeft-=(short)2;
         }
-        
-        // bip32
-//        Secp256k1.setCommonCurveParameters(bip32_extendedkey);
 
         om_nextid= (short)0;
         setupDone = true;
@@ -1747,6 +1817,215 @@ public class Satocash extends javacard.framework.Applet {
         }// end for
 
         return buffer_offset;
+    }
+
+    /****************************************
+     *             BIP32 Methods            *
+     ****************************************/
+
+    /**
+     * The function computes the Bip32 extended key derived from the master key.
+     * The Path for the derivation is provided in arguments as byte array.
+     *
+     **/
+    private void deriveBIP32ExtendedKey(byte[] path_bytes, short offset, short length){
+
+        short bip32_depth = (short)(length>>2);
+        if ((bip32_depth < 0) || (bip32_depth > BIP32_MAX_DEPTH) )
+            ISOException.throwIt(SW_INVALID_PARAMETER);
+
+        // copy bip32_master to recvBuffer
+        Util.arrayCopyNonAtomic(bip32_master, (short)32, recvBuffer, BIP32_OFFSET_PARENT_CHAINCODE, BIP32_KEY_SIZE);
+        Util.arrayCopyNonAtomic(bip32_master, (short)0, recvBuffer, BIP32_OFFSET_PARENT_KEY, BIP32_KEY_SIZE);
+        recvBuffer[BIP32_OFFSET_PARENT_SEPARATOR]= 0x00; // separator, also facilitate HMAC derivation
+        // recvBuffer map: [ bip32_masterchaincode(32b) | 0x00(1b) | bip32_masterkey(32b)]
+
+        // The method uses a temporary buffer recvBuffer to store the parent and extended key object data:
+        // recvBuffer=[ parent_chain_code (32b) | 0x00 | parent_key (32b) | buffer(index)(32b) | current_extended_key(32b) | current_chain_code(32b) | parent_pubkey(65b)]
+        // parent_pubkey(65b)= [compression_byte(1b) | coord_x (32b) | coord_y(32b)]
+
+        if (bip32_extendedkey_transient) {
+            Secp256k1.setCommonCurveParameters(bip32_extendedkey);
+        }
+
+        // path indexes are stored in buffer starting at ISO7816.OFFSET_CDATA offset
+        // iterate on indexes provided
+        for (byte i=0; i<bip32_depth; i++){
+            short path_offset = (short)(offset+4*i);
+
+            // normal or hardened child?
+            byte msb= path_bytes[path_offset];
+            if ((msb & 0x80)!=0x80){ // normal child
+
+                // compute coord x from privkey
+                bip32_extendedkey.setS(recvBuffer, BIP32_OFFSET_PARENT_KEY, BIP32_KEY_SIZE);
+                keyAgreement.init(bip32_extendedkey);
+
+                // keyAgreement.generateSecret() recovers X and Y coordinates
+                keyAgreement.generateSecret(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_G, (short) 65, recvBuffer, BIP32_OFFSET_PUB); //pubkey in uncompressed form
+                boolean parity= ((recvBuffer[(short)(BIP32_OFFSET_PUBY+31)]&0x01)==0);
+                byte compbyte= (parity)?(byte)0x02:(byte)0x03;
+
+                // compute HMAC of compressed pubkey + index
+                recvBuffer[BIP32_OFFSET_PUB]= compbyte;
+                Util.arrayCopyNonAtomic(path_bytes, path_offset, recvBuffer, BIP32_OFFSET_PUBY, (short)4);
+                HmacSha512.computeHmacSha512(recvBuffer, BIP32_OFFSET_PARENT_CHAINCODE, BIP32_KEY_SIZE, recvBuffer, BIP32_OFFSET_PUB, (short)(1+BIP32_KEY_SIZE+4), recvBuffer, BIP32_OFFSET_CHILD_KEY);
+            }
+            else { // hardened child
+                recvBuffer[BIP32_OFFSET_PARENT_SEPARATOR]= 0x00;
+                Util.arrayCopyNonAtomic(path_bytes, path_offset, recvBuffer, BIP32_OFFSET_INDEX, (short)4);
+                HmacSha512.computeHmacSha512(recvBuffer, BIP32_OFFSET_PARENT_CHAINCODE, BIP32_KEY_SIZE, recvBuffer, BIP32_OFFSET_PARENT_SEPARATOR, (short)(1+BIP32_KEY_SIZE+4), recvBuffer, BIP32_OFFSET_CHILD_KEY);
+            }
+
+            // addition with parent_key...
+            // First check that parse256(IL) < SECP256K1_R
+            if(!Biginteger.lessThan(recvBuffer, BIP32_OFFSET_CHILD_KEY, Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_R, BIP32_KEY_SIZE)){
+                ISOException.throwIt(SW_BIP32_DERIVATION_ERROR);
+            }
+            // add parent_key (mod SECP256K1_R)
+            if(Biginteger.add_carry(recvBuffer, BIP32_OFFSET_CHILD_KEY, recvBuffer, (short) (BIP32_KEY_SIZE+1), BIP32_KEY_SIZE)){
+                // in case of final carry, we must substract SECP256K1_R
+                // we have IL<SECP256K1_R and parent_key<SECP256K1_R, so IL+parent_key<2*SECP256K1_R
+                Biginteger.subtract(recvBuffer, BIP32_OFFSET_CHILD_KEY, Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_R, BIP32_KEY_SIZE);
+            }else{
+                // in the unlikely case where SECP256K1_R<=IL+parent_key<2^256
+                if(!Biginteger.lessThan(recvBuffer, BIP32_OFFSET_CHILD_KEY, Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_R, BIP32_KEY_SIZE)){
+                    Biginteger.subtract(recvBuffer, BIP32_OFFSET_CHILD_KEY, Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_R, BIP32_KEY_SIZE);
+                }
+                // check that value is not 0
+                if(Biginteger.equalZero(recvBuffer, BIP32_OFFSET_CHILD_KEY, BIP32_KEY_SIZE)){
+                    ISOException.throwIt(SW_BIP32_DERIVATION_ERROR);
+                }
+            }
+
+            // at this point, recvBuffer contains the extended key at depth i
+            recvBuffer[BIP32_OFFSET_PUB]=0x04;
+            // copy privkey & chain code in parent's offset
+            Util.arrayCopyNonAtomic(recvBuffer, BIP32_OFFSET_CHILD_CHAINCODE, recvBuffer, BIP32_OFFSET_PARENT_CHAINCODE, BIP32_KEY_SIZE); // chaincode
+            Util.arrayCopyNonAtomic(recvBuffer, BIP32_OFFSET_CHILD_KEY, recvBuffer, BIP32_OFFSET_PARENT_KEY, BIP32_KEY_SIZE); // extended_key
+            recvBuffer[BIP32_OFFSET_PARENT_SEPARATOR]=0x00;
+        } // end for
+
+        // at this point, recvBuffer contains a copy of the chaincode & last extended private key
+        // instantiate elliptic curve with last extended key
+        bip32_extendedkey.setS(recvBuffer, BIP32_OFFSET_PARENT_KEY, BIP32_KEY_SIZE);
+
+    }// end of deriveBIP32ExtendedKey()
+
+    /****************************************
+     *            Schnorr Methods           *
+     ****************************************/
+
+    /**
+     * This function signs a given hash with the last BIP32 derived key.
+     *
+     * Before using this method to sign a tx hash, a BIP32 privkey must be derived
+     * from the BIP32 master_key using a BIP32 path.
+     *
+     */
+    private short SignSchnorrHash(byte[] hash_buffer, short hash_offset, byte[] sig_buffer, short sig_offset){
+
+        if (ephemeral_privkey_transient) {
+            Secp256k1.setCommonCurveParameters(ephemeral_privkey);
+        }
+
+        // DEBUG using test vector 0 from bip0340
+        //public static byte[] sk0= {}; //0000000000000000000000000000000000000000000000000000000000000003
+        //public static byte[] m0= {}; //0000000000000000000000000000000000000000000000000000000000000000
+        //public static byte[] aux= {}; //0000000000000000000000000000000000000000000000000000000000000000
+        //Util.arrayFillNonAtomic(recvBuffer, OFFSET_BIP340_sk, (short)32, (byte)0);
+        //recvBuffer[(short)(OFFSET_BIP340_sk + 31)]= (byte)0x03;
+        //taproot_tweakedkey.setS(recvBuffer, OFFSET_BIP340_sk, (short)32);
+        //Util.arrayFillNonAtomic(recvBuffer, OFFSET_BIP340_a, (short)32, (byte)0);
+        // ENDBUG
+
+        // recvBuffer=[t_R(32b) | P(32b) | m(32b) | e(32b) | d(32b) | k(32b) | sk(32b) | a(32b) ]
+        // recvBuffer=[t_R(32b) | P(32b) | m(32b) | e(32b) | d(32b) | k(32b) | pubkey(65b) ]
+
+        // compute the corresponding partial public key...
+        keyAgreement.init(bip32_extendedkey);
+        keyAgreement.generateSecret(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_G, (short) 65, recvBuffer, OFFSET_BIP340_pubkey); //pubkey in uncompressed form (65bytes)
+        Util.arrayCopyNonAtomic(recvBuffer, OFFSET_BIP340_pubkeyx, recvBuffer, OFFSET_BIP340_P, (short)32); // copy bytes(P) to dedicated memory
+        // check evenness
+        if (recvBuffer[OFFSET_BIP340_pubkey+64]%2 == 0){
+            // d= sk
+            bip32_extendedkey.getS(recvBuffer, OFFSET_BIP340_d);
+        } else {
+            // d= n-sk
+            bip32_extendedkey.getS(recvBuffer, OFFSET_BIP340_sk);
+            Util.arrayCopyNonAtomic(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_R, recvBuffer, OFFSET_BIP340_d, (short)32);
+            Biginteger.subtract(recvBuffer, OFFSET_BIP340_d, recvBuffer, OFFSET_BIP340_sk, (short)32);
+        }
+        // t = bytes(d) ^ hashBIP0340/aux(a)
+        randomData.generateData(recvBuffer, OFFSET_BIP340_a, (short)32); // generate randomness in a
+        schnorr_hash_tag(tags, (short)0, (short)11, recvBuffer, OFFSET_BIP340_a, (short)32, recvBuffer, OFFSET_BIP340_t_R);
+        short i;
+        for (i = (short)0; i < (short)32; i++){
+            recvBuffer[(short)(OFFSET_BIP340_t_R+i)] = (byte) (recvBuffer[(short)(OFFSET_BIP340_t_R+i)] ^ recvBuffer[(short)(OFFSET_BIP340_d+i)]);
+        }
+        // Let rand = hashBIP0340/nonce(t || bytes(P) || m)
+        // t and bytes(P) are already copied in buffer, we still have to copy m from args
+        Util.arrayCopyNonAtomic(hash_buffer, hash_offset, recvBuffer, OFFSET_BIP340_m, MessageDigest.LENGTH_SHA_256);
+        schnorr_hash_tag(tags, (short)11, (short)13, recvBuffer, OFFSET_BIP340_t_R, (short)96, recvBuffer, OFFSET_BIP340_t_R); // reuse t to store rand
+        // k', k
+        if (Biginteger.equalZero(recvBuffer, OFFSET_BIP340_t_R, (short)32)){
+            ISOException.throwIt((short)0x7778);
+        }
+        // todo: rand = rand % n
+        ephemeral_privkey.setS(recvBuffer, OFFSET_BIP340_t_R, (short)32);
+        keyAgreement.init(ephemeral_privkey);
+        keyAgreement.generateSecret(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_G, (short) 65, recvBuffer, OFFSET_BIP340_pubkey); //pubkey in uncompressed form (65bytes)
+        // check evenness
+        if (recvBuffer[OFFSET_BIP340_pubkey+64]%2 == 0){
+            // k = rand
+            Util.arrayCopyNonAtomic(recvBuffer, OFFSET_BIP340_t_R, recvBuffer, OFFSET_BIP340_k, (short)32);
+        } else {
+            // k = n-rand
+            Util.arrayCopyNonAtomic(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_R, recvBuffer, OFFSET_BIP340_k, (short)32);
+            Biginteger.subtract(recvBuffer, OFFSET_BIP340_k, recvBuffer, OFFSET_BIP340_t_R, (short)32);
+        }
+        // e = int(hashBIP0340/challenge(bytes(R) || bytes(P) || m)) mod n
+        Util.arrayCopyNonAtomic(recvBuffer, OFFSET_BIP340_pubkeyx, recvBuffer, OFFSET_BIP340_t_R, (short)32); // copy R coordx to buffer in OFFSET_BIP340_t_R
+        schnorr_hash_tag(tags, (short)24, (short)17, recvBuffer, OFFSET_BIP340_t_R, (short)96, recvBuffer, OFFSET_BIP340_e);
+        // todo: e = e mod n
+
+        //compute (k+e*d) mod n
+        //e*d => buffer2
+        short sizez = Biginteger.mult_rsa_trick(recvBuffer, OFFSET_BIP340_e, recvBuffer, OFFSET_BIP340_d, (short)32, Biginteger.buffer2, (short)0);
+
+        // (e*d +k) => buffer1
+        Util.arrayFillNonAtomic(Biginteger.buffer1, (short)0, (short)Biginteger.buffer1.length, (byte)0);
+        Util.arrayCopyNonAtomic(recvBuffer, OFFSET_BIP340_k, Biginteger.buffer1, (short)(Biginteger.buffer1.length-32), (short)32); // copy 32bytes k to 96bytes buffer
+        boolean carry = Biginteger.add_carry(Biginteger.buffer1, (short)0, Biginteger.buffer2, (short)0, (short)Biginteger.buffer1.length);
+
+        // (e*d + k) mod n => buffer1
+        sizez= Biginteger.mod(Biginteger.buffer1, (short)0, (short)Biginteger.buffer1.length, Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_R, (short)32);
+
+        // return bytes(R) || e*d + k mod n
+        Util.arrayCopyNonAtomic(recvBuffer, OFFSET_BIP340_t_R, sig_buffer, sig_offset, (short)32);
+        Util.arrayCopyNonAtomic(Biginteger.buffer1, (short)64, sig_buffer, (short)(sig_offset+32), (short)32);
+
+        // clean buffers
+        Util.arrayFillNonAtomic(recvBuffer, (short)0, OFFSET_BIP340_size, (byte)0);
+        Util.arrayFillNonAtomic(Biginteger.buffer1, (short)0, (short)Biginteger.buffer1.length, (byte)0);
+        Util.arrayFillNonAtomic(Biginteger.buffer2, (short)0, (short)Biginteger.buffer2.length, (byte)0);
+
+        // return Schnorr sig size
+        return (short)64;
+    }
+
+    // BIP0340 hashtag function for Schnorr signatures
+    public short schnorr_hash_tag(
+            byte[] tag, short tag_offset, short tag_length,
+            byte[] msg, short msg_offset, short msg_length,
+            byte[] dst, short dst_offset){
+        sha256.reset();
+        sha256.doFinal(tag, tag_offset, tag_length, tmpBuffer, (short)0);
+        Util.arrayCopyNonAtomic(tmpBuffer, (short)0, tmpBuffer, (short)32, (short)32);
+        Util.arrayCopyNonAtomic(msg, msg_offset, tmpBuffer, (short)64, msg_length);
+        sha256.reset();
+        sha256.doFinal(tmpBuffer, (short)0, (short)(64+msg_length), dst, dst_offset);
+        return (short)32;
     }
 
     /****************************************
