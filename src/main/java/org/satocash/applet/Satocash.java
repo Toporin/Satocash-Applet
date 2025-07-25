@@ -31,8 +31,6 @@
 
 package org.satocash.applet;
 
-import javax.print.attribute.standard.MediaSize.ISO;
-
 import javacard.framework.APDU;
 import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
