@@ -430,6 +430,8 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte PIN_POLICY_MASK_MAKE_PAYMENT = 0x04;
     private byte[] pin_policy_amount_threshold;
     private static final short PIN_POLICY_AMOUNT_THRESHOLD_SIZE = 0x04;
+    // Cumulative pinless amount tracking
+    private byte[] pin_policy_cumulative_amount;
     // todo: policy to require authentication for payment?
 
     // NFC 
@@ -479,6 +481,8 @@ public class Satocash extends javacard.framework.Applet {
         pin_policy = PIN_POLICY_MASK_CHANGE_STATE | PIN_POLICY_MASK_MAKE_PAYMENT;
         // Threshold for all units requires allocating (how_many_units) * (bytes for threshold) bytes
         pin_policy_amount_threshold = new byte[UNITS_LENGTH * PIN_POLICY_AMOUNT_THRESHOLD_SIZE];
+        // Cumulative pinless amount tracking for all units
+        pin_policy_cumulative_amount = new byte[UNITS_LENGTH * PIN_POLICY_AMOUNT_THRESHOLD_SIZE];
 
         // Temporary working arrays
         try {
@@ -983,6 +987,10 @@ public class Satocash extends javacard.framework.Applet {
         Util.arrayFillNonAtomic(proofs, (short)0, (short)proofs.length, (byte)0);
         Util.arrayFillNonAtomic(keysets, (short)0, (short)keysets.length, (byte)0);
         Util.arrayFillNonAtomic(mints, (short)0, (short)mints.length, (byte)0);
+
+        // reset pin_policy_amount_threshold
+        Util.arrayFillNonAtomic(pin_policy_amount_threshold, (short)0, (short)(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), (byte)0x00);
+        Util.arrayFillNonAtomic(pin_policy_cumulative_amount, (short)0, (short)(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), (byte)0x00);
 
         // reset export list
         short index;
@@ -1570,7 +1578,7 @@ public class Satocash extends javacard.framework.Applet {
 
                     // Get the amount of the proof and accumulate it into `tmpBuffer`
                     // Amount exponent needs to be converted to a number
-                    Util.arrayFillNonAtomic(tmpBuffer2, (short)0, (short)4, (byte)0x00);
+                    Util.arrayFillNonAtomic(tmpBuffer2, (short)0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE, (byte)0x00);
                     byte exponent = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)];
                     if (exponent != 0xFF) {
                         // exponent can't be > 24
@@ -1589,12 +1597,25 @@ public class Satocash extends javacard.framework.Applet {
                 // if PIN policy requires it, check that PIN has been entered previously
                 if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT) {
                     
-                    // Compare the pin_policy_amount_threshold for the selected unit
-                    if (
-                        Biginteger.lessThan(pin_policy_amount_threshold, (short)((selected_unit-1) * PIN_POLICY_AMOUNT_THRESHOLD_SIZE), tmpBuffer, (short)0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)
-                        && !pin.isValidated()
-                    )
-                        ISOException.throwIt(SW_UNAUTHORIZED);
+                    // Get the current cumulative amount for this unit
+                    short cumulative_offset = (short)((selected_unit-1) * PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
+                    
+                    // Add the current transaction amount to cumulative amount
+                    if (Biginteger.add_carry(pin_policy_cumulative_amount, cumulative_offset, tmpBuffer, (short)0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)) {
+                        ISOException.throwIt(SW_MATH_OVERFLOW);
+                    }
+                    
+                    // Check if cumulative amount exceeds threshold and PIN is not validated
+                    if (Biginteger.lessThan(pin_policy_amount_threshold, cumulative_offset, pin_policy_cumulative_amount, cumulative_offset, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)) { 
+                        if (!pin.isValidated()) {
+                            ISOException.throwIt(SW_UNAUTHORIZED);
+                        }
+                        
+                        // If the PIN is validated, reset the cumulative amount
+                        resetCumulativeAmount(selected_unit);
+                    }
+                    
+
                 }
 
                 proof_export_size = proof_index_list_size;
@@ -1795,6 +1816,16 @@ public class Satocash extends javacard.framework.Applet {
     /****************************************
      *               PIN Methods            *
      ****************************************/
+
+    /**
+     * Reset cumulative pinless amounts for all units to zero
+     * This should be called when PIN is successfully validated
+     */
+    private void resetCumulativeAmount(short unit) {
+        if (pin_policy_cumulative_amount != null) {
+            Util.arrayFillNonAtomic(pin_policy_cumulative_amount, (short)((unit-1)*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), PIN_POLICY_AMOUNT_THRESHOLD_SIZE, (byte)0);
+        }
+    }
 
     /** 
      * This function verifies a PIN number sent by the DATA portion. The length of
