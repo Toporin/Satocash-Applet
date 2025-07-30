@@ -60,11 +60,12 @@ public class Satocash extends javacard.framework.Applet {
      *
      * 0.1-0.1: (WIP) initial version
      * 0.1-0.2: (WIP) support import authentikey during personalization. This key can be shared by multiple devices for privacy.
+     * 0.2-0.1: (WIP) support P2PK proofs with BIP32 key derivation and Schnorr signature.
      */
     private final static byte PROTOCOL_MAJOR_VERSION = (byte) 0; 
-    private final static byte PROTOCOL_MINOR_VERSION = (byte) 1;
+    private final static byte PROTOCOL_MINOR_VERSION = (byte) 2;
     private final static byte APPLET_MAJOR_VERSION = (byte) 0;
-    private final static byte APPLET_MINOR_VERSION = (byte) 2;
+    private final static byte APPLET_MINOR_VERSION = (byte) 1;
 
     // Maximum size for the extended APDU buffer 
     private final static short EXT_APDU_BUFFER_SIZE = (short) 320;
@@ -127,6 +128,7 @@ public class Satocash extends javacard.framework.Applet {
     private final static byte INS_SATOCASH_IMPORT_PROOF = (byte)0xB7;
     private final static byte INS_SATOCASH_EXPORT_PROOFS = (byte)0xB8;
     private final static byte INS_SATOCASH_GET_PROOF_INFO = (byte)0xB9;
+    private final static byte INS_SATOCASH_EXPORT_PROOF_P2PK_SIG = (byte)0xBA;
 
     // TODO
     // 2FA support
@@ -234,7 +236,8 @@ public class Satocash extends javacard.framework.Applet {
 
     /** Satocash errors */
     private final static short SW_OBJECT_ALREADY_PRESENT = (short) 0x9C60;
-
+    private final static short SW_INVALID_P2PK_PATH = (short) 0x9C61;
+    private final static short SW_REUSED_P2PK_PATH = (short) 0x9C62;
 
     // KeyBlob Encoding in Key Blobs
     //private final static byte BLOB_ENC_PLAIN = (byte) 0x00;
@@ -324,6 +327,7 @@ public class Satocash extends javacard.framework.Applet {
     private ECPrivateKey bip32_extendedkey; // object storing last extended key used
     private boolean bip32_extendedkey_transient = false;
     private byte[] bip32_counter; // 4-byte counter for deriving nut11 P2PK keys
+    private byte[] bip32_counter_for_import; // 4-byte counter for used for checking validity of imported P2PK proofs.
 
     // offset in working buffer
     // recvBuffer=[parent_chain_code (32b) | 0x00 | parent_key (32b) | buffer(index)(32b) | current_extended_key(32b) | current_chain_code(32b) | pubkey(65b)]
@@ -387,13 +391,14 @@ public class Satocash extends javacard.framework.Applet {
     // Proofs table
     private byte[] proofs;
     private static final short MAX_NB_PROOFS = 128; // todo: configurable in constructor
-    private static final byte PROOF_OBJECT_SIZE = 68;
     private static final byte PROOF_OFFSET_STATE = 0; // 1 byte
     private static final byte PROOF_OFFSET_KEYSET_INDEX = 1; // 1 byte
     private static final byte PROOF_OFFSET_AMOUNT_EXPONENT = 2; // 1 byte
     private static final byte PROOF_OFFSET_UNBLINDED_KEY = 3; // 33 bytes
     private static final byte PROOF_OFFSET_SECRET = 36; // 32 bytes
-
+    private static final byte PROOF_OFFSET_P2PK_PATH = 68; // 32 bytes
+    private static final byte PROOF_OBJECT_SIZE = PROOF_OFFSET_P2PK_PATH + 4;
+    private static final byte PROOF_OBJECT_SIZE_WITHOUT_P2PK = PROOF_OFFSET_P2PK_PATH;
 
     // Proofs export index list
     private short[] proof_export_list;
@@ -419,6 +424,8 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte STATE_EMPTY=0;
     private static final byte STATE_UNSPENT=1;
     private static final byte STATE_SPENT=2;
+    private static final byte STATE_MASK_SPENT = (byte)0x03; // the 2 least significant bits represent the spent status of the proof
+    private static final byte STATE_MASK_P2PK = (byte)0x80; // the most significant bit defines whether proof is P2PK or not
 
     // Unit constants
     private static final byte UNIT_NONE = 0; // empty slot flag
@@ -434,6 +441,22 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte METADATA_AMOUNT_EXPONENT = 2;
     private static final byte METADATA_MINT_INDEX = 3;
     private static final byte METADATA_UNIT = 4;
+
+    // nut-11 secret template, as used for P2PK signing
+    // '["P2PK",{"nonce":"","data":"","tags":[["sigflag","SIG_INPUTS"]]}]'
+    //["P2PK",{"nonce":"
+    //offset 0, length 18
+    //","data":"
+    //offset 18, length 10
+    //","tags":[["sigflag","SIG_INPUTS"]]}]
+    //offset 28, length 37
+    private static final byte[] NUT11_SIG_TEMPLATE = {'[','"','P','2','P','K','"',',','{','"','n','o','n','c','e','"',':','"', '"',',','"','d','a','t','a','"',':','"', '"',',','"','t','a','g','s','"',':','[','[','"','s','i','g','f','l','a','g','"',',','"','S','I','G','_','I','N','P','U','T','S','"',']',']','}',']'};
+    private static final byte NUT11_PART1_OFFSET = 0;
+    private static final byte NUT11_PART1_LENGTH = 18;
+    private static final byte NUT11_PART2_OFFSET = 18;
+    private static final byte NUT11_PART2_LENGTH = 10;
+    private static final byte NUT11_PART3_OFFSET = 28;
+    private static final byte NUT11_PART3_LENGTH = 37;
 
     /*********************************************
      *        Other data instances               *
@@ -478,6 +501,9 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte NFC_DISABLED=1; // can be re-enabled at any time
     private static final byte NFC_BLOCKED=2; // warning: cannot be re-enabled except with reset factory!
     private byte nfc_policy;
+
+    /** for bytes to hex conversion **/
+    static final byte[] HEX = {'0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F'};
 
     /*********************************************
      *               PKI objects                 *
@@ -611,6 +637,8 @@ public class Satocash extends javacard.framework.Applet {
         randomData.generateData(bip32_master, (short)0, (short)64);
         // bip32 counter, used for path derivation, start from 0, incremented before derivation
         bip32_counter = new byte[(short)4];
+        //bip32_counter[0] = (byte) 0x80; // hardened path
+        bip32_counter_for_import = new byte[(short)4];
 
         // Schnorr signatures
         // initialize Biginteger static data (required for Schnorr signatures)
@@ -841,6 +869,9 @@ public class Satocash extends javacard.framework.Applet {
                 break;
             case INS_SATOCASH_GET_PROOF_INFO:
                 sizeout= satocashGetProofInfo(apdu, buffer);
+                break;
+            case INS_SATOCASH_EXPORT_PROOF_P2PK_SIG:
+                sizeout= satocashExportProofP2PKSig(apdu, buffer);
                 break;
 
             // PKI
@@ -1466,11 +1497,11 @@ public class Satocash extends javacard.framework.Applet {
             ISOException.throwIt(SW_INCORRECT_P1);
 
         // check that no proofs refers to this keyset
-        for (byte proof_index = (byte)0; proof_index< MAX_NB_PROOFS; proof_index++){
+        for (short proof_index = (byte)0; proof_index< MAX_NB_PROOFS; proof_index++){
             if ((proofs[(short)(proof_index* PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)]) == index) {
                 // check if the keyset is still referenced by an unspent proof
                 // spent proof are basically only kept as backup
-                if ((proofs[(short)(proof_index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)]) == STATE_UNSPENT)
+                if ((proofs[(short)(proof_index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] & STATE_MASK_SPENT) == STATE_UNSPENT)
                     ISOException.throwIt(SW_OPERATION_NOT_ALLOWED);
             }
         }
@@ -1487,10 +1518,10 @@ public class Satocash extends javacard.framework.Applet {
      *  ins: 0xB7
      *  p1: RFU
      *  p2: RFU
-     *  data: [keyset_index(1b) | amount_exponent(1b) | unblinded_key(33b) | secret(32b)]
+     *  data: [keyset_index(1b) | amount_exponent(1b) | unblinded_key(33b) | secret(32b) | p2pk_path(4b - optional)]
      *  return: [index(2b)]
      *
-     *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C01 SW_NO_MEMORY_LEFT, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER
+     *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C01 SW_NO_MEMORY_LEFT, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER, 9C61 SW_INVALID_P2PK_PATH, 9C62 SW_REUSED_P2PK_PATH
      */
     private short satocashImportProof(APDU apdu, byte[] buffer) {
         // todo: pin required?
@@ -1501,12 +1532,12 @@ public class Satocash extends javacard.framework.Applet {
 //        }
 
         // check that there are still proof slot available
-        if ((short)(NB_PROOFS_SPENT + NB_PROOFS_UNSPENT) >= MAX_NB_PROOFS)
-            ISOException.throwIt(SW_NO_MEMORY_LEFT); // todo: use more specific error?
+        if (NB_PROOFS_UNSPENT >= MAX_NB_PROOFS)
+            ISOException.throwIt(SW_NO_MEMORY_LEFT);
 
         // check input size
         short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
-        if (bytesLeft < (short)(PROOF_OBJECT_SIZE -1))
+        if (bytesLeft < (short)(PROOF_OBJECT_SIZE -1 - 4))
             ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 
         short buffer_offset=ISO7816.OFFSET_CDATA;
@@ -1528,8 +1559,8 @@ public class Satocash extends javacard.framework.Applet {
         // find empty slot
         byte found_slot_state = STATE_UNSPENT;
         short index;
-        for (index=(byte)0; index< MAX_NB_PROOFS; index++) {
-            if ((proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)]) == STATE_EMPTY) {
+        for (index=(short)0; index< MAX_NB_PROOFS; index++) {
+            if ((proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] & STATE_MASK_SPENT) == STATE_EMPTY) {
                 // slot is empty
                 found_slot_state = STATE_EMPTY;
                 break;
@@ -1538,8 +1569,8 @@ public class Satocash extends javacard.framework.Applet {
 
         if (found_slot_state == STATE_UNSPENT){
             // if no empty slot available, look for a spent_slot to overwrite
-            for (index=(byte)0; index< MAX_NB_PROOFS; index++) {
-                if ((proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)]) == STATE_SPENT) {
+            for (index=(short)0; index< MAX_NB_PROOFS; index++) {
+                if ((proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] & STATE_MASK_SPENT) == STATE_SPENT) {
                     // slot is spent
                     found_slot_state = STATE_SPENT;
                     break;
@@ -1557,8 +1588,39 @@ public class Satocash extends javacard.framework.Applet {
         Util.arrayCopy(buffer, buffer_offset, proofs, (short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_UNBLINDED_KEY), (short) 65);
         buffer_offset+=(short)65;
 
-        // update state
-        proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] = STATE_UNSPENT;
+        // copy P2PK_path if any
+        if (bytesLeft == (short)(PROOF_OBJECT_SIZE -1)) {
+
+            // check P2PK_PATH corresponds to valid counter
+            // the P2PK_PATH should be lower than or equal to bip32_counter
+            // so bip32_counter should NOT be striclty lower than P2PK_path
+            if (Biginteger.lessThan(bip32_counter, (short)0, buffer, buffer_offset, (short) 4)){
+                ISOException.throwIt(SW_INVALID_P2PK_PATH);
+            }
+            // the P2PK_PATH as 4-byte counter should be strictly increasing to ensure that no proof is reused
+            // The bip32_counter_for_import should be strictly lower than the P2PK_path
+            // otherwise, this means that this proof has already been imported
+            if (!Biginteger.lessThan(bip32_counter_for_import, (short)0, buffer, buffer_offset, (short) 4)){
+                ISOException.throwIt(SW_REUSED_P2PK_PATH);
+            }
+
+            // copy the P2PK_path in the proof store
+            Util.arrayCopy(buffer, buffer_offset, proofs, (short) (index * PROOF_OBJECT_SIZE + PROOF_OFFSET_P2PK_PATH), (short) 4);
+
+            // on successful import, bip32_counter_for_import is updated
+            Util.arrayCopy(buffer, buffer_offset, bip32_counter_for_import, (short)0, (short) 4);
+
+            // update state to unspent, with P2PK flag
+            proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] = STATE_UNSPENT ^ STATE_MASK_P2PK;
+
+        } else {
+            // fill P2PK_PATH with 0
+            Util.arrayFillNonAtomic(proofs, (short) (index * PROOF_OBJECT_SIZE + PROOF_OFFSET_P2PK_PATH), (short) 4, (byte)0);
+            // update state to unspent, without P2PK flag
+            proofs[(short)(index* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] = STATE_UNSPENT;
+        }
+
+        // update proof counters
         NB_PROOFS_UNSPENT++;
         if (found_slot_state == STATE_SPENT)
             NB_PROOFS_SPENT--;
@@ -1649,29 +1711,30 @@ public class Satocash extends javacard.framework.Applet {
                     nb_proof_to_process = 3;
 
                 // start from last proof_export_index position and export each proof
+                // We export proofs without the P2PK_PATH, as this is not required (save space and compatibility)
                 for (byte i= 0; i<nb_proof_to_process; i++){
                     // get index_proof from state
                     short index_proof = proof_export_list[proof_export_index++];
 
                     // check proof state
-                    short proof_offset_state = (short)(index_proof* PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE);
-                    if (proofs[proof_offset_state] == STATE_EMPTY){
+                    short proof_offset_state = (short)(index_proof*PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE);
+                    if ((proofs[proof_offset_state] & STATE_MASK_SPENT) == STATE_EMPTY){
                         // if proof is empty, fill with 0x00
                         Util.setShort(buffer, buffer_offset, index_proof);
                         buffer_offset+=2;
-                        Util.arrayFillNonAtomic(buffer, buffer_offset, PROOF_OBJECT_SIZE, (byte)0x00);
+                        Util.arrayFillNonAtomic(buffer, buffer_offset, PROOF_OBJECT_SIZE_WITHOUT_P2PK, (byte)0x00);
                         //buffer[buffer_offset] = STATE_EMPTY; // update state, not needed as STATE_EMPTY == 0x00
-                        buffer_offset+= PROOF_OBJECT_SIZE;
+                        buffer_offset+= PROOF_OBJECT_SIZE_WITHOUT_P2PK;
 
                     } else {
                         // export proof data
                         Util.setShort(buffer, buffer_offset, index_proof);
                         buffer_offset+=2;
-                        Util.arrayCopy(proofs, proof_offset_state, buffer, buffer_offset, PROOF_OBJECT_SIZE);
-                        buffer_offset+= PROOF_OBJECT_SIZE;
-                        // if proof was unspent, change its state to spent
-                        if (proofs[proof_offset_state] == STATE_UNSPENT) {
-                            proofs[proof_offset_state] = STATE_SPENT;
+                        Util.arrayCopy(proofs, proof_offset_state, buffer, buffer_offset, PROOF_OBJECT_SIZE_WITHOUT_P2PK);
+                        buffer_offset+= PROOF_OBJECT_SIZE_WITHOUT_P2PK;
+                        // if proof was unspent, change its state to spent (while keeping P2PK status)
+                        if ((proofs[proof_offset_state] & STATE_MASK_SPENT) == STATE_UNSPENT) {
+                            proofs[proof_offset_state] = (byte) ((proofs[proof_offset_state] & STATE_MASK_P2PK) ^ STATE_SPENT);
                             NB_PROOFS_SPENT++;
                             NB_PROOFS_UNSPENT--;
                         }
@@ -1796,7 +1859,7 @@ public class Satocash extends javacard.framework.Applet {
                 metadata = keysets[(short)(metadata*KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
                 if (metadata == unit){
                     // get proof state
-                    metadata = proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)];
+                    metadata = (byte) (proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE)] & STATE_MASK_SPENT);
                     if (metadata == STATE_UNSPENT){
                         // get proof amount exponent
                         metadata = proofs[(short)(index*PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)];
@@ -1823,6 +1886,97 @@ public class Satocash extends javacard.framework.Applet {
     }
 
     /****************************************
+     *            NUT11 signature           *
+     ****************************************/
+
+    /**
+     * This function returns a proof P2PK signature (NUT11).
+     *
+     *  ins: 0xBA
+     *  p1: (RFU)
+     *  p2: (RFU)
+     *  data: [proof_index(2b)]
+     *  return: [sig(64b)]
+     *
+     *  Exceptions: 9C06 SW_UNAUTHORIZED, 9C0F SW_INVALID_PARAMETER, 6700 SW_WRONG_LENGTH
+     */
+    private short satocashExportProofP2PKSig(APDU apdu, byte[] buffer) {
+
+        // if PIN policy requires it, check that PIN has been entered previously
+        if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT) {
+            if (!pin.isValidated())
+                ISOException.throwIt(SW_UNAUTHORIZED);
+        }
+
+        // check input size
+        short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
+        if (bytesLeft < (short)2)
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+        // get proof index
+        short buffer_offset = ISO7816.OFFSET_CDATA;
+        short proof_index = Util.getShort(buffer, buffer_offset);
+        if (proof_index<0 || proof_index>=MAX_NB_PROOFS)
+            ISOException.throwIt(SW_INVALID_PARAMETER);
+
+        // check proof state
+        short proof_offset_state = (short)(proof_index*PROOF_OBJECT_SIZE + PROOF_OFFSET_STATE);
+        if ((proofs[proof_offset_state] & STATE_MASK_SPENT) == STATE_EMPTY){
+            ISOException.throwIt(SW_INVALID_PARAMETER); // todo?
+        }
+        if ((proofs[proof_offset_state] & STATE_MASK_P2PK) == 0x00){
+            ISOException.throwIt(SW_INVALID_PARAMETER); // todo?
+        }
+
+        // derive extended privkey based on path
+        short proof_offset_path = (short)(proof_index*PROOF_OBJECT_SIZE + PROOF_OFFSET_P2PK_PATH);
+        deriveBIP32ExtendedKey(proofs, proof_offset_path, (short)4);
+
+        // compute public key
+        short offset_pubkey = (short)130;
+        keyAgreement.init(bip32_extendedkey);
+        keyAgreement.generateSecret(Secp256k1.SECP256K1, Secp256k1.OFFSET_SECP256K1_G, (short) 65, recvBuffer, offset_pubkey); //pubkey in uncompressed form
+        if (recvBuffer[(short)(offset_pubkey+64)]%2 == 0x00){
+            recvBuffer[offset_pubkey] = 0x02;
+        } else {
+            recvBuffer[offset_pubkey] = 0x03;
+        }
+
+        // compute 64-hex string for secret nonce
+        byte tmpByte;
+        short offset = (short)0x00;
+        short proof_offset_secret = (short)(proof_index*PROOF_OBJECT_SIZE + PROOF_OFFSET_SECRET);
+        for (short i=0; i<32; i++){
+            // For each byte, convert the two 4-bit nibbles to their hexadecimal value in ascii
+            tmpByte = proofs[(short)(proof_offset_secret+i)];
+            recvBuffer[offset++] = HEX[(tmpByte >> 4) & 0x0F];
+            recvBuffer[offset++] = HEX[tmpByte & 0x0F];
+        }
+
+        // compute 66-hex string for public key
+        for (short i=0; i<33; i++){
+            // For each byte, convert the two 4-bit nibbles to their hexadecimal value in ascii
+            tmpByte = recvBuffer[(short)(offset_pubkey+i)];
+            recvBuffer[offset++] = HEX[(tmpByte >> 4) & 0x0F];
+            recvBuffer[offset++] = HEX[tmpByte & 0x0F];
+        }
+
+        // compute hash for NUT11
+        sha256.reset();
+        sha256.update(NUT11_SIG_TEMPLATE, NUT11_PART1_OFFSET, NUT11_PART1_LENGTH);
+        sha256.update(recvBuffer, (short)0, (short)64);
+        sha256.update(NUT11_SIG_TEMPLATE, NUT11_PART2_OFFSET, NUT11_PART2_LENGTH);
+        sha256.update(recvBuffer, (short)64, (short)66);
+        sha256.doFinal(NUT11_SIG_TEMPLATE, NUT11_PART3_OFFSET, NUT11_PART3_LENGTH, recvBuffer, (short)0);
+
+        // compute schnorr signature on the hash
+        SignSchnorrHash(recvBuffer, (short)0, buffer, (short)0);
+
+        // return
+        return (short)64;
+    }
+
+    /****************************************
      *             BIP32 Methods            *
      ****************************************/
 
@@ -1840,6 +1994,7 @@ public class Satocash extends javacard.framework.Applet {
      *
      * return: [ counter(4b) | pubkey(65b) | sig_size(2b) | self-sig | sig_size(2b) | authentikey-sig]
      *
+     * Exceptions: 9C06 SW_UNAUTHORIZED, 9C0F SW_INVALID_PARAMETER, 9C03 SW_BIP32_DERIVATION_ERROR
      * */
     private short getBIP32ExtendedKey(APDU apdu, byte[] buffer){
         // if PIN policy requires it, check that PIN has been entered previously
