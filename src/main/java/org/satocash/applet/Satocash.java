@@ -385,7 +385,7 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte UNIT_MSAT = 2;
     private static final byte UNIT_USD = 3;
     private static final byte UNIT_EUR = 4;
-    private static final short UNITS_LENGTH = 4; // todo: rename to NB_UNITS
+    private static final short NB_UNITS = 4;
     private static final byte AMOUNT_NULL = (byte) 0xff;
 
     // metadata_type constants
@@ -482,9 +482,9 @@ public class Satocash extends javacard.framework.Applet {
         // default PIN policy: require pin to change state or make payment
         pin_policy = PIN_POLICY_MASK_CHANGE_STATE | PIN_POLICY_MASK_MAKE_PAYMENT;
         // Threshold for all units requires allocating (how_many_units) * (bytes for threshold) bytes
-        pin_policy_amount_threshold = new byte[UNITS_LENGTH * PIN_POLICY_AMOUNT_THRESHOLD_SIZE];
+        pin_policy_amount_threshold = new byte[NB_UNITS * PIN_POLICY_AMOUNT_THRESHOLD_SIZE];
         // Cumulative pinless amount tracking for all units
-        pin_policy_cumulative_amount = new byte[UNITS_LENGTH * PIN_POLICY_AMOUNT_THRESHOLD_SIZE];
+        pin_policy_cumulative_amount = new byte[NB_UNITS * PIN_POLICY_AMOUNT_THRESHOLD_SIZE];
 
         // Temporary working arrays
         try {
@@ -994,8 +994,8 @@ public class Satocash extends javacard.framework.Applet {
 
         // reset pin_policy & pin_policy_amount_threshold
         pin_policy = PIN_POLICY_MASK_CHANGE_STATE | PIN_POLICY_MASK_MAKE_PAYMENT;
-        Util.arrayFillNonAtomic(pin_policy_amount_threshold, (short)0, (short)(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), (byte)0x00);
-        Util.arrayFillNonAtomic(pin_policy_cumulative_amount, (short)0, (short)(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), (byte)0x00);
+        Util.arrayFillNonAtomic(pin_policy_amount_threshold, (short)0, (short)(NB_UNITS *PIN_POLICY_AMOUNT_THRESHOLD_SIZE), (byte)0x00);
+        Util.arrayFillNonAtomic(pin_policy_cumulative_amount, (short)0, (short)(NB_UNITS *PIN_POLICY_AMOUNT_THRESHOLD_SIZE), (byte)0x00);
 
         // reset export list
         short index;
@@ -1051,8 +1051,8 @@ public class Satocash extends javacard.framework.Applet {
      *            MAX_NB_KEYSET(1b) | NB_USED_KEYSET(1b)  |
      *            MAX_NB_PROOFS(2b) | NB_PROOFS_UNSPENT(2b) | NB_PROOFS_SPENT(2b) |
      *            RFU(6b) |
-     *            size(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_amount_threshold |
-     *            size(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_cumulative_amount
+     *            size(NB_UNITS*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_amount_threshold |
+     *            size(NB_UNITS*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_cumulative_amount
      *          ]
      *
      *  Exceptions: (none)
@@ -1117,14 +1117,14 @@ public class Satocash extends javacard.framework.Applet {
         pos+=6;
 
         // max amount allowed without PIN (pin_policy_amount_threshold)
-        // format [size(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_amount_threshold]
-        byte amounts_size = (byte) (UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
+        // format [size(NB_UNITS*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_amount_threshold]
+        byte amounts_size = (byte) (NB_UNITS *PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
         buffer[pos++] = amounts_size;
         Util.arrayCopyNonAtomic(pin_policy_amount_threshold, (short)0, buffer, pos, amounts_size);
         pos+=amounts_size;
 
         // amount already spent without PIN (pin_policy_cumulative_amount)
-        // format [size(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_cumulative_amount]
+        // format [size(NB_UNITS*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_cumulative_amount]
         buffer[pos++] = amounts_size;
         Util.arrayCopyNonAtomic(pin_policy_cumulative_amount, (short)0, buffer, pos, amounts_size);
         pos+=amounts_size;
@@ -1594,7 +1594,7 @@ public class Satocash extends javacard.framework.Applet {
                             ISOException.throwIt(SW_INVALID_PARAMETER);
                         }
                         // if selected unit is not in the range for which amount threshold is defined, PIN is required
-                        if (selected_unit > UNITS_LENGTH) {
+                        if (selected_unit > NB_UNITS) {
                             if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT){
                                 if (!pin.isValidated()) {
                                     ISOException.throwIt(SW_UNAUTHORIZED);
@@ -2326,7 +2326,7 @@ public class Satocash extends javacard.framework.Applet {
 
         byte unit = buffer[ISO7816.OFFSET_P2];
         // Make sure the unit is valid
-        if (unit < UNIT_SAT || unit > UNITS_LENGTH) {
+        if (unit < UNIT_SAT || unit > NB_UNITS) {
             ISOException.throwIt(SW_INCORRECT_P2);
         }
 
