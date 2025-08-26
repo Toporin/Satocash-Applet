@@ -60,11 +60,12 @@ public class Satocash extends javacard.framework.Applet {
      *
      * 0.1-0.1: (WIP) initial version
      * 0.1-0.2: (WIP) support import authentikey during personalization. This key can be shared by multiple devices for privacy.
+     * 0.1-0.3: (WIP) Add amount limits for PIN-less payments.
      */
     private final static byte PROTOCOL_MAJOR_VERSION = (byte) 0; 
     private final static byte PROTOCOL_MINOR_VERSION = (byte) 1;
     private final static byte APPLET_MAJOR_VERSION = (byte) 0;
-    private final static byte APPLET_MINOR_VERSION = (byte) 2;
+    private final static byte APPLET_MINOR_VERSION = (byte) 3;
 
     // Maximum size for the extended APDU buffer 
     private final static short EXT_APDU_BUFFER_SIZE = (short) 320;
@@ -231,13 +232,11 @@ public class Satocash extends javacard.framework.Applet {
     private final static short SW_DEBUG_FLAG = (short) 0x9FFF;
 
     /** Satocash errors */
-    private final static short SW_OBJECT_ALREADY_PRESENT = (short) 0x9C60;
-
+    //private final static short SW_OBJECT_ALREADY_PRESENT = (short) 0x9C60;
     /** Math error */
-    private final static short SW_MATH_OVERFLOW = (short) 0x9999;
-
+    private final static short SW_MATH_OVERFLOW = (short) 0x9C61;
     /** Multiple units error */
-    private final static short SW_MULTIPLE_UNITS = (short) 0x9990;
+    private final static short SW_MULTIPLE_UNITS = (short) 0x9C62;
 
 
     // KeyBlob Encoding in Key Blobs
@@ -346,7 +345,7 @@ public class Satocash extends javacard.framework.Applet {
     // Proofs table
     private byte[] proofs;
     private static final short MAX_NB_PROOFS = 128; // todo: configurable in constructor
-    private static final byte MAX_PROOF_EXPONENT = 24; // 2^24 * 2^7 == 2^31
+    private static final byte MAX_PROOF_EXPONENT = 31;
     private static final byte PROOF_OBJECT_SIZE = 68;
     private static final byte PROOF_OFFSET_STATE = 0; // 1 byte
     private static final byte PROOF_OFFSET_KEYSET_INDEX = 1; // 1 byte
@@ -386,7 +385,7 @@ public class Satocash extends javacard.framework.Applet {
     private static final byte UNIT_MSAT = 2;
     private static final byte UNIT_USD = 3;
     private static final byte UNIT_EUR = 4;
-    private static final short UNITS_LENGTH = 4;
+    private static final short UNITS_LENGTH = 4; // todo: rename to NB_UNITS
     private static final byte AMOUNT_NULL = (byte) 0xff;
 
     // metadata_type constants
@@ -962,9 +961,6 @@ public class Satocash extends javacard.framework.Applet {
             base+=(short)2;
             bytesLeft-=(short)2;
         }
-        
-        // bip32
-//        Secp256k1.setCommonCurveParameters(bip32_extendedkey);
 
         om_nextid= (short)0;
         setupDone = true;
@@ -996,7 +992,8 @@ public class Satocash extends javacard.framework.Applet {
         Util.arrayFillNonAtomic(keysets, (short)0, (short)keysets.length, (byte)0);
         Util.arrayFillNonAtomic(mints, (short)0, (short)mints.length, (byte)0);
 
-        // reset pin_policy_amount_threshold
+        // reset pin_policy & pin_policy_amount_threshold
+        pin_policy = PIN_POLICY_MASK_CHANGE_STATE | PIN_POLICY_MASK_MAKE_PAYMENT;
         Util.arrayFillNonAtomic(pin_policy_amount_threshold, (short)0, (short)(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), (byte)0x00);
         Util.arrayFillNonAtomic(pin_policy_cumulative_amount, (short)0, (short)(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), (byte)0x00);
 
@@ -1052,7 +1049,10 @@ public class Satocash extends javacard.framework.Applet {
      *            pin_policy(1b) | RFU(1b) |
      *            MAX_NB_MINT (1b) | NB_USED_MINT(1b) |
      *            MAX_NB_KEYSET(1b) | NB_USED_KEYSET(1b)  |
-     *            MAX_NB_PROOFS(2b) | NB_PROOFS_UNSPENT(2b) | NB_PROOFS_SPENT(2b)
+     *            MAX_NB_PROOFS(2b) | NB_PROOFS_UNSPENT(2b) | NB_PROOFS_SPENT(2b) |
+     *            RFU(6b) |
+     *            size(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_amount_threshold |
+     *            size(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_cumulative_amount
      *          ]
      *
      *  Exceptions: (none)
@@ -1111,7 +1111,24 @@ public class Satocash extends javacard.framework.Applet {
         pos+=2;
         Util.setShort(buffer, pos, NB_PROOFS_SPENT);
         pos+=2;
-        // todo max amount allowed without PIN (pin_policy_amount_threshold)
+
+        // RFU (6b)
+        Util.arrayFillNonAtomic(buffer, pos, (short)6, (byte)0x00);
+        pos+=6;
+
+        // max amount allowed without PIN (pin_policy_amount_threshold)
+        // format [size(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_amount_threshold]
+        byte amounts_size = (byte) (UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
+        buffer[pos++] = amounts_size;
+        Util.arrayCopyNonAtomic(pin_policy_amount_threshold, (short)0, buffer, pos, amounts_size);
+        pos+=amounts_size;
+
+        // amount already spent without PIN (pin_policy_cumulative_amount)
+        // format [size(UNITS_LENGTH*PIN_POLICY_AMOUNT_THRESHOLD_SIZE) | pin_policy_cumulative_amount]
+        buffer[pos++] = amounts_size;
+        Util.arrayCopyNonAtomic(pin_policy_cumulative_amount, (short)0, buffer, pos, amounts_size);
+        pos+=amounts_size;
+
         return pos;
     }
 
@@ -1524,7 +1541,7 @@ public class Satocash extends javacard.framework.Applet {
      *
      *  return: [proof_index(2b) | proof_state(1b) | keyset_index(1b) | amount_exponent(1b) | unblinded_key(33b) | secret(32b)]
      *
-     *  exceptions (OP_INIT): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER,
+     *  exceptions (OP_INIT): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 6700 SW_WRONG_LENGTH, 9C0F SW_INVALID_PARAMETER, 9C61 SW_MATH_OVERFLOW, 9C62 SW_MULTIPLE_UNITS,
      *  exceptions (OP_PROCESS): 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 9C13 SW_INCORRECT_INITIALIZATION,
      */
     private short satocashExportProofs(APDU apdu, byte[] buffer) {
@@ -1567,62 +1584,81 @@ public class Satocash extends javacard.framework.Applet {
                     if (index_proof<0 || index_proof>= MAX_NB_PROOFS)
                         ISOException.throwIt(SW_INVALID_PARAMETER);
 
-
-                    // unit from the first proof is the reference for future proofs
+                    // check unit consistency
+                    byte index_keyset = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)];
                     if (index_in == 0) {
-                        byte index_selected_keyset = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)];
-                        selected_unit = keysets[(short)(index_selected_keyset * KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
-                        if (selected_unit == UNIT_NONE) {
+                        // unit from the first proof is the reference for future proofs
+                        selected_unit = keysets[(short)(index_keyset * KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
+                        // check that selected unit is valid
+                        if (selected_unit <= UNIT_NONE) {
                             ISOException.throwIt(SW_INVALID_PARAMETER);
                         }
-                    }
-
-                    // if the unit is not the same, throw an error
-                    byte index_keyset = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_KEYSET_INDEX)];
-                    byte unit = keysets[(short)(index_keyset * KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
-                    if (unit != selected_unit) {
-                        ISOException.throwIt(SW_MULTIPLE_UNITS);
-                    }
-
-                    // Get the amount of the proof and accumulate it into `tmpBuffer`
-                    // Amount exponent needs to be converted to a number
-                    Util.arrayFillNonAtomic(tmpBuffer2, (short)0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE, (byte)0x00);
-                    byte exponent = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)];
-                    if (exponent != 0xFF) {
-                        // exponent can't be > 24
-                        byte div = (byte)(exponent >> 3);
-                        // div can't be > 3
-                        byte rem = (byte)(exponent - 8*div);
-                        tmpBuffer2[3-div] = (byte)(1 << rem);
-                        if (Biginteger.add_carry(tmpBuffer, (short)0, tmpBuffer2, (short)0, (short)4)) {
-                            ISOException.throwIt(SW_MATH_OVERFLOW);
+                        // if selected unit is not in the range for which amount threshold is defined, PIN is required
+                        if (selected_unit > UNITS_LENGTH) {
+                            if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT){
+                                if (!pin.isValidated()) {
+                                    ISOException.throwIt(SW_UNAUTHORIZED);
+                                }
+                            }
+                        }
+                    } else {
+                        // if the unit is not the same as reference, throw an error
+                        byte unit = keysets[(short)(index_keyset * KEYSET_OBJECT_SIZE + KEYSET_OFFSET_UNIT)];
+                        if (unit != selected_unit) {
+                            ISOException.throwIt(SW_MULTIPLE_UNITS);
                         }
                     }
+
+                    // check PIN policy
+                    if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT){
+
+                        // compute total proof amount
+                        if (!pin.isValidated()) {
+
+                            // Get the amount of the proof and accumulate it into `tmpBuffer`
+                            // Amount exponent needs to be converted to a number
+                            Util.arrayFillNonAtomic(tmpBuffer2, (short)0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE, (byte)0x00);
+                            byte exponent = proofs[(short)(index_proof * PROOF_OBJECT_SIZE + PROOF_OFFSET_AMOUNT_EXPONENT)];
+                            if (exponent != AMOUNT_NULL) {
+                                // exponent can't be > 31
+                                byte div = (byte)(exponent >> 3); // div can't be > 3
+                                byte rem = (byte)(exponent & 0x07); // rem can't be > 7
+                                tmpBuffer2[3-div] = (byte)(1 << rem);
+                                if (Biginteger.add_carry(tmpBuffer, (short)0, tmpBuffer2, (short)0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)) {
+                                    ISOException.throwIt(SW_MATH_OVERFLOW);
+                                }
+                            }
+                        }
+                    }
+
                     // save index_proof in state
                     proof_export_list[index_out++] = index_proof;
                 }
 
-                // if PIN policy requires it, check that PIN has been entered previously
+                // if PIN policy requires it, check if amount threshold is reached
                 if ((pin_policy & PIN_POLICY_MASK_MAKE_PAYMENT) == PIN_POLICY_MASK_MAKE_PAYMENT) {
-                    
-                    // Get the current cumulative amount for this unit
-                    short cumulative_offset = (short)((selected_unit-1) * PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
-                    
-                    // Add the current transaction amount to cumulative amount
-                    if (Biginteger.add_carry(pin_policy_cumulative_amount, cumulative_offset, tmpBuffer, (short)0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)) {
-                        ISOException.throwIt(SW_MATH_OVERFLOW);
-                    }
-                    
-                    // Check if cumulative amount exceeds threshold and PIN is not validated
-                    if (Biginteger.lessThan(pin_policy_amount_threshold, cumulative_offset, pin_policy_cumulative_amount, cumulative_offset, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)) { 
-                        if (!pin.isValidated()) {
-                            ISOException.throwIt(SW_UNAUTHORIZED);
+
+                    if (!pin.isValidated()) {
+                        // Get the current cumulative amount for this unit
+                        short cumulative_offset = (short) ((selected_unit - 1) * PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
+
+                        // Add the cumulative amount to current transaction amount
+                        if (Biginteger.add_carry(tmpBuffer, (short) 0, pin_policy_cumulative_amount, cumulative_offset, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)) {
+                            ISOException.throwIt(SW_MATH_OVERFLOW);
                         }
-                        
-                        // If the PIN is validated, reset the cumulative amount
+
+                        // Check if new total cumulative amount exceeds threshold
+                        if (Biginteger.lessThan(pin_policy_amount_threshold, cumulative_offset, tmpBuffer, (short) 0, PIN_POLICY_AMOUNT_THRESHOLD_SIZE)) {
+                            ISOException.throwIt(SW_UNAUTHORIZED);
+                        } else {
+                            // update pin_policy_cumulative_amount
+                            Util.arrayCopyNonAtomic(tmpBuffer, (short) 0, pin_policy_cumulative_amount, cumulative_offset, PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
+                        }
+
+                    } else {
+                        // If the PIN is validated, reset the pinless cumulative amount
                         resetCumulativeAmount(selected_unit);
                     }
-                    
 
                 }
 
@@ -1826,7 +1862,7 @@ public class Satocash extends javacard.framework.Applet {
      ****************************************/
 
     /**
-     * Reset cumulative pinless amounts for all units to zero
+     * Reset cumulative pinless amounts for given unit to zero
      * This should be called when PIN is successfully validated
      */
     private void resetCumulativeAmount(short unit) {
@@ -2206,6 +2242,8 @@ public class Satocash extends javacard.framework.Applet {
      *  p2: RFU (set specific permission policies for NFC interface)
      *  data: (none)
      *  return: (none)
+     *
+     *  exceptions: 9C06 SW_UNAUTHORIZED, 9C10 SW_INCORRECT_P1, 9C48 SW_NFC_DISABLED, 9C49 SW_NFC_BLOCKED
      */
     private short setNfcPolicy(APDU apdu, byte[] buffer){
         // check that PIN has been entered previously
@@ -2248,11 +2286,15 @@ public class Satocash extends javacard.framework.Applet {
      *  p2: RFU
      *  data: (none)
      *  return: (none)
+     *
+     *  exceptions: 9C06 SW_UNAUTHORIZED,
      */
     private short setPinPolicy(APDU apdu, byte[] buffer){
         // check that PIN has been entered previously
         if (!pin.isValidated())
             ISOException.throwIt(SW_UNAUTHORIZED);
+
+        // TODO: check 2FA if enabled
 
         // get new PIN policy from P1
         pin_policy = buffer[ISO7816.OFFSET_P1];
@@ -2272,15 +2314,19 @@ public class Satocash extends javacard.framework.Applet {
      *  p2: unit(1b)
      *  data: [amount(4b)]
      *  return: (none)
+     *
+     *  exceptions: 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 6700 SW_WRONG_LENGTH
      */
     private short setPinlessAmount(APDU apdu, byte[] buffer){
         // check that PIN has been entered previously
         if (!pin.isValidated())
             ISOException.throwIt(SW_UNAUTHORIZED);
 
+        // TODO: check 2FA if enabled
+
         byte unit = buffer[ISO7816.OFFSET_P2];
         // Make sure the unit is valid
-        if (unit < UNIT_SAT || unit > UNIT_EUR) {
+        if (unit < UNIT_SAT || unit > UNITS_LENGTH) {
             ISOException.throwIt(SW_INCORRECT_P2);
         }
 
@@ -2293,12 +2339,8 @@ public class Satocash extends javacard.framework.Applet {
         // copy array
         Util.arrayCopy(buffer, buffer_offset, pin_policy_amount_threshold, (short)((unit-1)*PIN_POLICY_AMOUNT_THRESHOLD_SIZE), PIN_POLICY_AMOUNT_THRESHOLD_SIZE);
 
-
         return (short)0;
     }
-
-// todo: amount policy: spending amount allowed before requiring pin
-
 
     /**
      * DEPRECATED - use exportAuthentikey() instead.
