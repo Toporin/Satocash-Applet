@@ -2310,12 +2310,12 @@ public class Satocash extends javacard.framework.Applet {
      * PIN must be validated to call this function.
      *
      *  ins: 0x3B
-     *  p1: RFU
-     *  p2: unit(1b)
+     *  p1: unit(1b)
+     *  p2: RFU
      *  data: [amount(4b)]
      *  return: (none)
      *
-     *  exceptions: 9C06 SW_UNAUTHORIZED, 9C11 SW_INCORRECT_P2, 6700 SW_WRONG_LENGTH
+     *  exceptions: 9C06 SW_UNAUTHORIZED, 9C10 SW_INCORRECT_P1, 6700 SW_WRONG_LENGTH
      */
     private short setPinlessAmount(APDU apdu, byte[] buffer){
         // check that PIN has been entered previously
@@ -2324,10 +2324,10 @@ public class Satocash extends javacard.framework.Applet {
 
         // TODO: check 2FA if enabled
 
-        byte unit = buffer[ISO7816.OFFSET_P2];
+        byte unit = buffer[ISO7816.OFFSET_P1];
         // Make sure the unit is valid
         if (unit < UNIT_SAT || unit > NB_UNITS) {
-            ISOException.throwIt(SW_INCORRECT_P2);
+            ISOException.throwIt(SW_INCORRECT_P1);
         }
 
         short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
