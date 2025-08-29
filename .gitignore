@@ -4,9 +4,6 @@ dist/
 .project
 gp.exe
 
-# javacard sdk
-sdks/
-
 # IntelliJ IDEA project files
 .idea
 *.iml
