@@ -14,9 +14,9 @@ For supported hardware, refer to the [Satochip applet repository](https://github
 
 # Build & install
 
-## Building using Ant (legacy)
-
 You can build the JavaCard CAP files or use the last [release](https://github.com/Toporin/Seedkeeper-Applet/releases).
+
+## Building using Ant (legacy)
 
 To generate the CAP file from the sources, you can use the [ant-javacard](https://github.com/martinpaljak/ant-javacard) Ant task (see the instructions on the ant-javacard github repository).
 
@@ -38,6 +38,13 @@ Then you must set the JavaCard HOME. The gradle.properties file has a setting wi
 To compile the JavaCard code and generate a cap file, simply run `./gradlew convertJavacard`. The cap file will be compiled in the `build/javacard/org/satocash/applet` folder.
 
 To load the cap file into a blank smart card, connect a card reader with the card inserted and run `./gradlew install`
+
+## Javacard version compatibility
+
+The JDK versions supported depend on the Javacard SDK used, see more details [in this page](https://github.com/martinpaljak/ant-javacard/wiki/JavaCard-SDK-and-JDK-version-compatibility).
+
+JDK 8 and JDK 11 offer the largest compatibility, but for latest SDKs, JDK 17 also works and is the preferred option.
+Currently, we use SDK 3.0.4 with JDK 8 or 11. We plan to switch to SDK 3.2.0 (v25.0) and JDK 17/21 after careful testing.
 
 # SDK (wip)
 
